@@ -81,12 +81,12 @@ The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry
 ## Architecture
 
 ```
-                        ┌─────────────────────┐
+                        ┌──────────────────────┐
                         │     Pipeline[T]      │
                         │  (retry + backpress) │
                         └──────┬──────┬────────┘
                                │      │
-                    ┌──────────┘      └──────────┐
+                    ┌──────────┘      └───────────┐
                     │                             │
            ┌────────┴────────┐          ┌─────────┴─────────┐
            │    Source[T]    │          │      Sink[T]      │
