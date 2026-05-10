@@ -87,11 +87,11 @@ The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry
  │        Source[T]          │   │       Pipeline[T]         │   │        Sink[T]            │
  │      Open / Close         │   │  (retry + backpressure)   │   │      Open / Close         │
  │      Read -> Msg[T]       │──▶│       transforms          │──▶│      Write(Msg[T])        │
- └┬──┬──┬──┬─────────────────┘   └───────────────────────────┘   └┬──┬──┬──┬─────────────────┘
-  │  │  │  │                                                      │  │  │  │
-  ▼  ▼  ▼  ▼                                                      ▼  ▼  ▼  ▼
-Kafka Kinesis Pub/Sub RabbitMQ                               Kafka Kinesis Pub/Sub RabbitMQ
-Source Source  Source  Source                                Sink   Sink   Sink   Sink
+ └┬─────┬──────┬──────┬──────┘   └───────────────────────────┘   └───┬─────┬──────┬─────┬────┘
+  │     │      │      │                                              │     │      │     │
+  ▼     ▼      ▼      ▼                                              ▼     ▼      ▼     ▼
+Kafka Kinesis Pub/Sub RabbitMQ                                  Kafka  Kinesis  Pub/Sub   RabbitMQ
+Source Source  Source  Source                                   Sink   Sink     Sink      Sink
 ```
 
 ### Message lifecycle through the pipeline
