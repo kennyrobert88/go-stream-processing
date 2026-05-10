@@ -4,7 +4,7 @@ module github.com/kennyrobert88/go-stream-processing
 // Versioning: semver via git tags, follow Go module versioning conventions.
 // For v2+, use the /v2 module path suffix.
 
-go 1.26.3
+go 1.25.0
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.4.0

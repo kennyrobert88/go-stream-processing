@@ -2,7 +2,7 @@
 
 > A unified, type-safe stream-processing connector library for Go. Abstract over Kafka, AWS Kinesis, Google Cloud Pub/Sub, and RabbitMQ with a single `Source[T]` / `Sink[T]` interface — swap brokers by changing one constructor. Inspired by Apache Beam and Apache Flink.
 
-[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/dl/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
@@ -188,7 +188,7 @@ Source.Read() ──► Filter ──► Transform[0] ──► ... ──► Fl
 
 ## Prerequisites
 
-- **Go 1.21+** (tested through Go 1.26)
+- **Go 1.25+** (tested through Go 1.26)
 - **Docker** (for running broker containers locally)
 - **AWS credentials** (optional, only for Kinesis)
 
@@ -1449,7 +1449,7 @@ For Kafka, offsets are committed by the `kafka.Reader` based on its configured c
 
 **Q: What Go versions are supported?**
 
-Go 1.21+ through the latest release. The library uses generics (introduced in Go 1.18) but requires Go 1.21+ due to upstream dependency requirements (`aws-sdk-go-v2`).
+Go 1.25+ through the latest release.
 
 **Q: Is this production ready?**
 
