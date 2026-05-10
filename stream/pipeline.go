@@ -468,9 +468,11 @@ func (p *Pipeline[T]) runLoopInternal(ctx context.Context, src Source[T], snks [
 			if useBatch {
 				p.flushBatch(ctx, snks, batch)
 			}
-			if useWindow && len(windowBuf) > 0 {
-				p.emitWindow(ctx, snks, windowBuf)
-			}
+		if useWindow && len(windowBuf) > 0 {
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			p.emitWindow(flushCtx, snks, windowBuf)
+			flushCancel()
+		}
 			return ctx.Err()
 		default:
 		}
