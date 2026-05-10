@@ -118,45 +118,45 @@ func (s *RabbitMQSource) connect(ctx context.Context) error {
 
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return stream.NewRetryableError(fmt.Errorf("rabbitmq source channel: %w", err))
 	}
 	s.channel = ch
 	s.notifyCh = ch.NotifyClose(make(chan *amqp.Error, 1))
 
 	if err := ch.Qos(s.cfg.PrefetchCount, 0, false); err != nil {
-		ch.Close()
-		conn.Close()
+		_ = ch.Close()
+		_ = conn.Close()
 		return stream.NewRetryableError(fmt.Errorf("rabbitmq source qos: %w", err))
 	}
 
 	if s.cfg.Exchange != "" {
 		if err := ch.ExchangeDeclare(s.cfg.Exchange, "direct", true, false, false, false, nil); err != nil {
-			ch.Close()
-			conn.Close()
+			_ = ch.Close()
+			_ = conn.Close()
 			return stream.NewRetryableError(fmt.Errorf("rabbitmq source exchange declare: %w", err))
 		}
 	}
 
 	q, err := ch.QueueDeclare(s.cfg.Queue, true, false, false, false, nil)
 	if err != nil {
-		ch.Close()
-		conn.Close()
+		_ = ch.Close()
+		_ = conn.Close()
 		return stream.NewRetryableError(fmt.Errorf("rabbitmq source queue declare: %w", err))
 	}
 
 	if s.cfg.Exchange != "" {
 		if err := ch.QueueBind(q.Name, s.cfg.RoutingKey, s.cfg.Exchange, false, nil); err != nil {
-			ch.Close()
-			conn.Close()
+			_ = ch.Close()
+			_ = conn.Close()
 			return stream.NewRetryableError(fmt.Errorf("rabbitmq source queue bind: %w", err))
 		}
 	}
 
 	deliveries, err := ch.Consume(q.Name, s.cfg.ConsumerTag, false, false, false, false, nil)
 	if err != nil {
-		ch.Close()
-		conn.Close()
+		_ = ch.Close()
+		_ = conn.Close()
 		return stream.NewRetryableError(fmt.Errorf("rabbitmq source consume: %w", err))
 	}
 	s.deliveries = deliveries
@@ -206,7 +206,7 @@ func (s *RabbitMQSource) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.channel != nil {
-		s.channel.Close()
+		_ = s.channel.Close()
 	}
 	if s.conn != nil {
 		return s.conn.Close()

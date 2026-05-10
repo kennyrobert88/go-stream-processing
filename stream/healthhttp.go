@@ -34,7 +34,11 @@ func (h *HealthHTTPServer) Start() error {
 	if err != nil {
 		return err
 	}
-	go h.server.Serve(listener)
+	go func() {
+		if err := h.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			h.probe.Liveness(context.Background())
+		}
+	}()
 	return nil
 }
 
@@ -65,17 +69,18 @@ func (h *HealthHTTPServer) allHandler(w http.ResponseWriter, r *http.Request) {
 	if !allHealthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	json.NewEncoder(w).Encode(reports)
+	_ = json.NewEncoder(w).Encode(reports)
 }
 
 func writeHealthResponse(w http.ResponseWriter, report HealthReport) {
 	w.Header().Set("Content-Type", "application/json")
 	statusCode := http.StatusOK
-	if report.Status == StatusUnhealthy {
+	switch report.Status {
+	case StatusUnhealthy:
 		statusCode = http.StatusServiceUnavailable
-	} else if report.Status == StatusDegraded {
+	case StatusDegraded:
 		statusCode = http.StatusOK
 	}
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(report)
+	_ = json.NewEncoder(w).Encode(report)
 }

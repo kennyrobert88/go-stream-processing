@@ -88,11 +88,10 @@ func (a *kafkaAck) Nack(_ context.Context) error {
 }
 
 type KafkaSource struct {
-	cfg       KafkaSourceConfig
-	reader    *kafka.Reader
-	cb        *stream.CircuitBreaker
-	logger    stream.Logger
-	cbClose   func()
+	cfg    KafkaSourceConfig
+	reader *kafka.Reader
+	cb     *stream.CircuitBreaker
+	logger stream.Logger
 }
 
 func NewKafkaSource(cfg KafkaSourceConfig) *KafkaSource {
@@ -228,7 +227,7 @@ func (s *KafkaSource) tryReconnect(ctx context.Context) error {
 		}
 		s.logger.Info(ctx, "kafka source reconnecting", "attempt", i+1, "max", s.cfg.MaxReconnects)
 		if s.reader != nil {
-			s.reader.Close()
+			_ = s.reader.Close()
 		}
 		if err := s.connect(ctx); err == nil {
 			s.logger.Info(ctx, "kafka source reconnected", "attempt", i+1)

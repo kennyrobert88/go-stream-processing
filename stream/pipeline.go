@@ -319,9 +319,9 @@ func (p *Pipeline[T]) Run(ctx context.Context) error {
 		p.mu.Lock()
 		p.running = false
 		p.mu.Unlock()
-		trackedSrc.Close(ctx)
+		_ = trackedSrc.Close(ctx)
 		for _, ts := range trackedSinks {
-			ts.Close(ctx)
+			_ = ts.Close(ctx)
 		}
 		return errors.Join(openErrs...)
 	}
@@ -510,7 +510,7 @@ func (p *Pipeline[T]) runLoopInternal(ctx context.Context, src Source[T], snks [
 			if p.errorHandler != nil {
 				p.errorHandler.OnTransformError(ctx, convertMsg(msg), err)
 			}
-			msg.Nack(ctx)
+			_ = msg.Nack(ctx)
 			continue
 		}
 
@@ -632,7 +632,7 @@ func (p *Pipeline[T]) processAndWrite(ctx context.Context, snks []Sink[T], msg M
 		if p.errorHandler != nil {
 			p.errorHandler.OnTransformError(ctx, convertMsg(msg), err)
 		}
-		msg.Nack(ctx)
+		_ = msg.Nack(ctx)
 		return
 	}
 	for _, out := range results {
@@ -666,16 +666,16 @@ func (p *Pipeline[T]) writeToSinks(ctx context.Context, snks []Sink[T], msg Mess
 	}
 
 	for _, snk := range snks {
-		snk.Flush(ctx)
+		_ = snk.Flush(ctx)
 	}
 
 	if failed {
-		msg.Nack(ctx)
+		_ = msg.Nack(ctx)
 		if p.dlq != nil {
-			p.dlq.Write(ctx, msg)
+			_ = p.dlq.Write(ctx, msg)
 		}
 	} else {
-		msg.Ack(ctx)
+		_ = msg.Ack(ctx)
 	}
 }
 

@@ -75,15 +75,15 @@ func (s *RabbitMQSink) connect(ctx context.Context) error {
 
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("rabbitmq sink channel: %w", err)
 	}
 	s.channel = ch
 
 	if s.cfg.Exchange != "" {
 		if err := ch.ExchangeDeclare(s.cfg.Exchange, "direct", true, false, false, false, nil); err != nil {
-			ch.Close()
-			conn.Close()
+			_ = ch.Close()
+			_ = conn.Close()
 			return fmt.Errorf("rabbitmq sink exchange declare: %w", err)
 		}
 	}
@@ -119,7 +119,7 @@ func (s *RabbitMQSink) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.channel != nil {
-		s.channel.Close()
+		_ = s.channel.Close()
 	}
 	if s.conn != nil {
 		err := s.conn.Close()

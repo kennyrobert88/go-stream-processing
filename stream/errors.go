@@ -46,8 +46,5 @@ func IsRetryable(err error) bool {
 		return true
 	}
 	var nre *NonRetryableError
-	if errors.As(err, &nre) {
-		return false
-	}
-	return true
+	return !errors.As(err, &nre)
 }

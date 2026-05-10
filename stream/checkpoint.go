@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 )
 
@@ -22,7 +21,6 @@ type CheckpointStore interface {
 }
 
 type FileCheckpointStore struct {
-	mu       sync.Mutex
 	basePath string
 }
 
@@ -41,9 +39,13 @@ func (f *FileCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) e
 	if err != nil {
 		return fmt.Errorf("checkpoint store: %w", err)
 	}
-	defer store.Flush(ctx)
+	if err := store.Flush(ctx); err != nil {
+		return fmt.Errorf("checkpoint flush: %w", err)
+	}
 
-	store.Write(ctx, "checkpoint", string(data))
+	if err := store.Write(ctx, "checkpoint", string(data)); err != nil {
+		return fmt.Errorf("checkpoint write: %w", err)
+	}
 	return nil
 }
 

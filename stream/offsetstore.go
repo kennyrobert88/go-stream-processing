@@ -77,7 +77,9 @@ func NewFileOffsetStore(path string) (*FileOffsetStore, error) {
 
 	data, err := os.ReadFile(path)
 	if err == nil {
-		json.Unmarshal(data, &s.offsets)
+		if err := json.Unmarshal(data, &s.offsets); err != nil {
+			return nil, fmt.Errorf("file offset store unmarshal: %w", err)
+		}
 	}
 
 	return s, nil

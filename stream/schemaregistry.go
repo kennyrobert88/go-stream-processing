@@ -113,7 +113,10 @@ func (c *ConfluentSchemaRegistry) Register(ctx context.Context, subject, schema 
 	if err != nil {
 		return 0, fmt.Errorf("schema registry post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -145,7 +148,10 @@ func (c *ConfluentSchemaRegistry) Fetch(ctx context.Context, id int) (*SchemaMet
 	if err != nil {
 		return nil, fmt.Errorf("schema registry get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("schema registry: %s", resp.Status)
@@ -184,7 +190,10 @@ func (c *ConfluentSchemaRegistry) FetchBySubject(ctx context.Context, subject st
 	if err != nil {
 		return nil, fmt.Errorf("schema registry get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("schema registry: %s", resp.Status)

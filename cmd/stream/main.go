@@ -92,7 +92,9 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	healthServer.Stop(shutdownCtx)
+	if err := healthServer.Stop(shutdownCtx); err != nil {
+		log.Printf("Warning: health server stop: %v", err)
+	}
 }
 
 func buildKafkaPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *stream.Pipeline[[]byte] {

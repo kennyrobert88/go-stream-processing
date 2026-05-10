@@ -48,17 +48,14 @@ func DefaultKinesisSourceConfig() KinesisSourceConfig {
 }
 
 type kinesisShardReader struct {
-	shardID      string
-	iterator     *string
-	records      []types.Record
-	recordIndex  int
+	shardID  string
+	iterator *string
 }
 
 type KinesisSource struct {
 	cfg    KinesisSourceConfig
 	client *kinesis.Client
 	shards []*kinesisShardReader
-	mu     sync.Mutex
 	msgCh  chan stream.Message[[]byte]
 	done   chan struct{}
 	wg     sync.WaitGroup

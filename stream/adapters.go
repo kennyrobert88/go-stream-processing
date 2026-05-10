@@ -30,7 +30,6 @@ func (m *MapPipe[T, U]) Read(ctx context.Context) (Message[U], error) {
 type MergeSource[T any] struct {
 	sources []Source[T]
 	ch      chan Message[T]
-	idx     int
 }
 
 func NewMergeSource[T any](sources ...Source[T]) *MergeSource[T] {
