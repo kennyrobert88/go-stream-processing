@@ -1,6 +1,6 @@
 # go-stream-processing
 
-> A unified, type-safe stream-processing connector library for Go. Abstract over Kafka, AWS Kinesis, and RabbitMQ with a single `Source[T]` / `Sink[T]` interface — swap brokers by changing one constructor. Inspired by Apache Beam and Apache Flink.
+> A unified, type-safe stream-processing connector library for Go. Abstract over Kafka, AWS Kinesis, Google Cloud Pub/Sub, and RabbitMQ with a single `Source[T]` / `Sink[T]` interface — swap brokers by changing one constructor. Inspired by Apache Beam and Apache Flink.
 
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/dl/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -35,6 +35,7 @@
   - [Kafka](#kafka)
   - [AWS Kinesis](#aws-kinesis)
   - [RabbitMQ](#rabbitmq)
+  - [Google Cloud Pub/Sub](#google-cloud-pubsub)
 - [Testing Guide](#testing-guide)
 - [Examples](#examples)
 - [FAQ](#faq)
@@ -82,24 +83,15 @@ The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry
 ## Architecture
 
 ```
-                        ┌──────────────────────┐
-                        │     Pipeline[T]      │
-                        │  (retry + backpress) │
-                        └──────┬──────┬────────┘
-                               │      │
-                    ┌──────────┘      └───────────┐
-                    │                             │
-           ┌────────┴────────┐          ┌─────────┴─────────┐
-           │    Source[T]    │          │      Sink[T]      │
-           │                 │          │                   │
-           │  Open / Close   │          │   Open / Close    │
-           │  Read -> Msg[T] │          │   Write(Msg[T])   │
-           └────────┬────────┘          └─────────┬─────────┘
-                    │                             │
-         ┌──────────┼──────────┐       ┌──────────┼──────────┐
-         ▼          ▼          ▼       ▼          ▼          ▼
-      Kafka    Kinesis    RabbitMQ  Kafka    Kinesis    RabbitMQ
-     Source    Source     Source    Sink     Sink       Sink
+ ┌───────────────────────────┐   ┌───────────────────────────┐   ┌───────────────────────────┐
+ │        Source[T]          │   │       Pipeline[T]         │   │        Sink[T]            │
+ │      Open / Close         │   │  (retry + backpressure)   │   │      Open / Close         │
+ │      Read -> Msg[T]       │──▶│       transforms          │──▶│      Write(Msg[T])        │
+ └┬──┬──┬──┬─────────────────┘   └───────────────────────────┘   └┬──┬──┬──┬─────────────────┘
+  │  │  │  │                                                      │  │  │  │
+  ▼  ▼  ▼  ▼                                                      ▼  ▼  ▼  ▼
+Kafka Kinesis Pub/Sub RabbitMQ                               Kafka Kinesis Pub/Sub RabbitMQ
+Source Source  Source  Source                                Sink   Sink   Sink   Sink
 ```
 
 ### Message lifecycle through the pipeline
