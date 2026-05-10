@@ -216,25 +216,25 @@ The test suite uses mocks and does **not** require any external broker running.
 
 ```bash
 # Run all tests with verbose output
-go test ./... -v -count=1
+go test ./stream/... ./internal/... -v -count=1
 
 # Run a specific test
 go test ./stream/... -run TestPipeline_Basic -v
 
 # Run with race detection
-go test ./stream/... -race -count=1
+go test ./stream/... ./internal/... -race -count=1
 
 # Code analysis
 go vet ./...
 ```
 
-Expected output (78 tests, all passing):
+Expected output:
 
 ```
 ok  	github.com/kennyrobert88/go-stream-processing/stream	2.774s
+ok  	github.com/kennyrobert88/go-stream-processing/stream/sink	1.500s
+ok  	github.com/kennyrobert88/go-stream-processing/stream/source	1.461s
 ?   	github.com/kennyrobert88/go-stream-processing/internal/mocks	[no test files]
-?   	github.com/kennyrobert88/go-stream-processing/stream/sink	[no test files]
-?   	github.com/kennyrobert88/go-stream-processing/stream/source	[no test files]
 ```
 
 ---

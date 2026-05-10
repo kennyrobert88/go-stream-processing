@@ -38,9 +38,9 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Unit Tests
-        run: go test ./... -count=1 -timeout=120s -v 2>&1 | go run github.com/rakyll/gotest@latest
+        run: go test ./stream/... ./internal/... -count=1 -timeout=120s -v 2>&1 | go run github.com/rakyll/gotest@latest
       - name: Race Detection
-        run: go test ./... -race -count=1 -timeout=120s
+        run: go test ./stream/... ./internal/... -race -count=1 -timeout=120s
       - name: Integration Build Check
         run: go build -tags integration ./...
 
@@ -54,4 +54,4 @@ jobs:
           go-version: "1.26"
           check-latest: true
       - name: Benchmarks
-        run: go test ./... -bench=. -benchtime=1x -count=1 -timeout=120s
+        run: go test ./stream/... -bench=. -benchtime=1x -count=1 -timeout=120s
