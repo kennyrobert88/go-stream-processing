@@ -114,7 +114,7 @@ func (c *ConfluentSchemaRegistry) Register(ctx context.Context, subject, schema 
 		return 0, fmt.Errorf("schema registry post: %w", err)
 	}
 	defer func() {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 
@@ -149,7 +149,7 @@ func (c *ConfluentSchemaRegistry) Fetch(ctx context.Context, id int) (*SchemaMet
 		return nil, fmt.Errorf("schema registry get: %w", err)
 	}
 	defer func() {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 
@@ -191,7 +191,7 @@ func (c *ConfluentSchemaRegistry) FetchBySubject(ctx context.Context, subject st
 		return nil, fmt.Errorf("schema registry get: %w", err)
 	}
 	defer func() {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 

@@ -493,6 +493,14 @@ func (p *Pipeline[T]) runLoopInternal(ctx context.Context, src Source[T], snks [
 		}, p.retryCfg)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if useBatch {
+					p.flushBatch(ctx, snks, batch)
+				}
+				if useWindow && len(windowBuf) > 0 {
+					flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					p.emitWindow(flushCtx, snks, windowBuf)
+					flushCancel()
+				}
 				return err
 			}
 			if p.errorHandler != nil {
@@ -607,11 +615,20 @@ func (p *Pipeline[T]) processWindow(ctx context.Context, snks []Sink[T], buf *[]
 		last := (*buf)[len(*buf)-1]
 		windowEnd := first.Timestamp.Truncate(p.windowCfg.Size).Add(p.windowCfg.Size)
 		if last.Timestamp.After(windowEnd) || last.Timestamp.Equal(windowEnd) {
-			if p.watermark != nil {
-				p.watermark.Advance(p.watermark.MaxTimestamp())
+			var split int
+			for i, msg := range *buf {
+				if !msg.Timestamp.Before(windowEnd) {
+					break
+				}
+				split = i + 1
 			}
-			p.emitWindow(ctx, snks, *buf)
-			*buf = nil
+			if split > 0 {
+				if p.watermark != nil {
+					p.watermark.Advance(p.watermark.MaxTimestamp())
+				}
+				p.emitWindow(ctx, snks, (*buf)[:split])
+				*buf = (*buf)[split:]
+			}
 		}
 	}
 }
