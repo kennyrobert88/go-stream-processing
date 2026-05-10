@@ -86,6 +86,37 @@ func main() {
 		}
 	}()
 
+	// --- Example: FlatMap usage (splitting a message into multiple) ---
+	flatMapSrc := source.NewKafkaSource(source.KafkaSourceConfig{
+		Brokers: []string{"localhost:9092"},
+		Topic:   "multi-input",
+		GroupID: "flatmap-group",
+	})
+	flatMapSnk := sink.NewKafkaSink(sink.KafkaSinkConfig{
+		Brokers: []string{"localhost:9092"},
+		Topic:   "multi-output",
+	})
+	_ = flatMapSrc
+	_ = flatMapSnk
+	/*
+	   flatMapPipeline := stream.NewPipeline(flatMapSrc, flatMapSnk).
+	       FlatMap(func(_ context.Context, msg stream.Message[[]byte]) ([]stream.Message[[]byte], error) {
+	           words := bytes.Split(msg.Value, []byte(" "))
+	           out := make([]stream.Message[[]byte], len(words))
+	           for i, w := range words {
+	               out[i] = stream.NewMessage(w)
+	               out[i].Key = msg.Key
+	           }
+	           return out, nil
+	       })
+
+	   go func() {
+	       if err := flatMapPipeline.Run(ctx); err != nil {
+	           log.Printf("flatmap pipeline stopped: %v", err)
+	       }
+	   }()
+	*/
+
 	<-ctx.Done()
 	fmt.Println("shutting down...")
 }

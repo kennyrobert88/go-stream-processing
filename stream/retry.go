@@ -16,6 +16,9 @@ func DoWithRetry(ctx context.Context, fn func(context.Context) error, cfg RetryC
 		if err = fn(ctx); err == nil {
 			return nil
 		}
+		if !IsRetryable(err) {
+			return err
+		}
 		if attempt == cfg.MaxRetries {
 			return err
 		}

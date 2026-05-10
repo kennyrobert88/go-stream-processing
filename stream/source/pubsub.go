@@ -15,6 +15,19 @@ type PubSubSourceConfig struct {
 	SubscriptionID string
 }
 
+type PubSubSourceOption func(*PubSubSourceConfig)
+
+func WithProjectID(id string) PubSubSourceOption {
+	return func(c *PubSubSourceConfig) { c.ProjectID = id }
+}
+func WithSubscriptionID(id string) PubSubSourceOption {
+	return func(c *PubSubSourceConfig) { c.SubscriptionID = id }
+}
+
+func DefaultPubSubSourceConfig() PubSubSourceConfig {
+	return PubSubSourceConfig{}
+}
+
 type PubSubSource struct {
 	cfg    PubSubSourceConfig
 	client *pubsub.Client
@@ -28,10 +41,18 @@ func NewPubSubSource(cfg PubSubSourceConfig) *PubSubSource {
 	return &PubSubSource{cfg: cfg}
 }
 
+func NewPubSubSourceWithOptions(opts ...PubSubSourceOption) *PubSubSource {
+	cfg := DefaultPubSubSourceConfig()
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return &PubSubSource{cfg: cfg}
+}
+
 func (s *PubSubSource) Open(ctx context.Context) error {
 	client, err := pubsub.NewClient(ctx, s.cfg.ProjectID)
 	if err != nil {
-		return fmt.Errorf("pubsub source client: %w", err)
+		return stream.NewNonRetryableError(fmt.Errorf("pubsub source client: %w", err))
 	}
 	s.client = client
 
@@ -80,7 +101,7 @@ func (s *PubSubSource) Read(ctx context.Context) (stream.Message[[]byte], error)
 		return stream.Message[[]byte]{}, ctx.Err()
 	case psMsg, ok := <-s.msgs:
 		if !ok {
-			return stream.Message[[]byte]{}, fmt.Errorf("pubsub source: source closed")
+			return stream.Message[[]byte]{}, stream.NewNonRetryableError(fmt.Errorf("pubsub source: source closed"))
 		}
 		msg := stream.Message[[]byte]{
 			Value:   psMsg.Data,
@@ -90,9 +111,10 @@ func (s *PubSubSource) Read(ctx context.Context) (stream.Message[[]byte], error)
 		for k, v := range psMsg.Attributes {
 			msg.Headers[k] = []byte(v)
 		}
+		var m = psMsg
 		msg.SetAckNack(
-			func(_ context.Context) error { psMsg.Ack(); return nil },
-			func(_ context.Context) error { psMsg.Nack(); return nil },
+			func(_ context.Context) error { m.Ack(); return nil },
+			func(_ context.Context) error { m.Nack(); return nil },
 		)
 		return msg, nil
 	}

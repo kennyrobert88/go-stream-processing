@@ -35,6 +35,8 @@ func (s *PubSubSink) Open(ctx context.Context) error {
 	return nil
 }
 
+func (s *PubSubSink) Flush(_ context.Context) error { return nil }
+
 func (s *PubSubSink) Close(_ context.Context) error {
 	if s.client != nil {
 		return s.client.Close()

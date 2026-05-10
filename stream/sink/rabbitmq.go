@@ -49,6 +49,8 @@ func (s *RabbitMQSink) Open(_ context.Context) error {
 	return nil
 }
 
+func (s *RabbitMQSink) Flush(_ context.Context) error { return nil }
+
 func (s *RabbitMQSink) Close(_ context.Context) error {
 	if s.channel != nil {
 		s.channel.Close()

@@ -32,6 +32,8 @@ func (s *KafkaSink) Open(_ context.Context) error {
 	return nil
 }
 
+func (s *KafkaSink) Flush(_ context.Context) error { return nil }
+
 func (s *KafkaSink) Close(_ context.Context) error {
 	if s.writer != nil {
 		return s.writer.Close()

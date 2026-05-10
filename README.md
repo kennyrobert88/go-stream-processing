@@ -57,10 +57,11 @@ type Sink[T any] interface {
     Open(ctx context.Context) error
     Close(ctx context.Context) error
     Write(ctx context.Context, msg Message[T]) error
+    Flush(ctx context.Context) error
 }
 ```
 
-The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry (exponential backoff with jitter) and backpressure (token-bucket rate limiting).
+The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry (exponential backoff with jitter), backpressure (token-bucket rate limiting), batching, windowing (tumbling/sliding/session/count), DLQ, filtering, flat-mapping, routing, metrics, error handling, stateful transforms, and concurrent workers.
 
 ### When to use this library
 
@@ -97,13 +98,15 @@ Source Source  Source  Source                                   Sink   Sink     
 ### Message lifecycle through the pipeline
 
 ```
-Source.Read() ──► Transform[0] ──► ... ──► Transform[N] ──► Sink.Write()
+Source.Read() ──► Filter ──► Transform[0] ──► ... ──► FlatMap ──► Sink.Write()
                       │                                            │
-                      │ on error                                   │ on success
-                      ▼                                            ▼
-                   msg.Nack()                                   msg.Ack()
+                      │ on ErrSkip (filter)                        │ on error ──► DLQ ──► msg.Nack()
+                      ▼                                            │
+                   (skip message)                                  ▼
+                                                               msg.Ack()
 
-  ── Any Read/Write error triggers retry (configurable) ──
+  ── Batching / Windowing / Routing inserted between transforms and sink ──
+  ── Any Read/Write error triggers retry (exponential backoff + jitter) ──
 ```
 
 ---
@@ -150,10 +153,10 @@ go test ./stream/... -race -count=1
 go vet ./...
 ```
 
-Expected output (30 tests, all passing):
+Expected output (78 tests, all passing):
 
 ```
-ok  	github.com/kennyrobert88/go-stream-processing/stream	6.817s
+ok  	github.com/kennyrobert88/go-stream-processing/stream	2.774s
 ?   	github.com/kennyrobert88/go-stream-processing/internal/mocks	[no test files]
 ?   	github.com/kennyrobert88/go-stream-processing/stream/sink	[no test files]
 ?   	github.com/kennyrobert88/go-stream-processing/stream/source	[no test files]
@@ -373,6 +376,88 @@ pipeline.AddTransform(func(ctx context.Context, msg stream.Message[[]byte]) (str
 
 If any transform returns an error, the message is Nacked and skipped. The pipeline continues to the next message.
 
+**Filter (drop messages):**
+
+```go
+pipeline.Filter(func(ctx context.Context, msg stream.Message[[]byte]) (bool, error) {
+    return len(msg.Value) > 0, nil // drop empty messages
+})
+```
+
+Return `(false, nil)` to drop; return an error to trigger ErrSkip or actual error handling.
+
+**FlatMap (one-to-many):**
+
+```go
+pipeline.FlatMap(func(ctx context.Context, msg stream.Message[[]byte]) ([]stream.Message[[]byte], error) {
+    words := bytes.Split(msg.Value, []byte(" "))
+    out := make([]stream.Message[[]byte], len(words))
+    for i, w := range words {
+        out[i] = stream.NewMessage(w)
+        out[i].Key = msg.Key
+    }
+    return out, nil
+})
+```
+
+FlatMap is useful for splitting, pattern matching, or exploding nested data into individual records.
+
+### 7.5. Batching and windowing
+
+**Batching** groups messages before writing to the sink:
+
+```go
+pipeline.WithBatchConfig(stream.BatchConfig{
+    Size:     100,                // flush after 100 messages
+    Interval: 5 * time.Second,    // or flush after 5s, whichever comes first
+})
+```
+
+**Windowing** groups messages into logical windows before writing:
+
+```go
+// Tumbling window (fixed non-overlapping intervals)
+pipeline.WithWindow(stream.WindowConfig{
+    Type: stream.WindowTypeTumbling,
+    Size: 10 * time.Second,
+})
+
+// Sliding window (overlapping, advances every 5s)
+pipeline.WithWindow(stream.WindowConfig{
+    Type:  stream.WindowTypeSliding,
+    Size:  10 * time.Second,
+    Slide: 5 * time.Second,
+})
+
+// Session window (closes after 30s of inactivity)
+pipeline.WithWindow(stream.WindowConfig{
+    Type:       stream.WindowTypeSession,
+    SessionGap: 30 * time.Second,
+})
+
+// Count window (every 1000 messages)
+pipeline.WithWindow(stream.WindowConfig{
+    Type:  stream.WindowTypeCount,
+    Count: 1000,
+})
+```
+
+**Concurrent processing** for higher throughput:
+
+```go
+pipeline.WithWorkers(4) // 1 reader goroutine + 4 worker goroutines
+```
+
+**Dead-letter queue** for failed messages:
+
+```go
+dlq := sink.NewKafkaSink(sink.KafkaSinkConfig{
+    Brokers: []string{"localhost:9092"},
+    Topic:   "failed-messages",
+})
+pipeline.WithDLQ(dlq)
+```
+
 ### 8. Add retry and backpressure
 
 ```go
@@ -422,9 +507,10 @@ if err := pipeline.Run(ctx); err != nil {
 
 On shutdown:
 1. The read loop sees the cancelled context and exits.
-2. Source is closed (Kafka consumer leaves the group, RabbitMQ channel closes).
-3. Sink is closed (Kafka writer flushes, RabbitMQ connection closes).
-4. Backpressure token refill goroutine is stopped.
+2. All sinks are flushed (buffered writes are committed).
+3. Source is closed (Kafka consumer leaves the group, RabbitMQ channel closes).
+4. All sinks are closed (Kafka writer flushes, RabbitMQ connection closes).
+5. Backpressure and per-sink backpressure token refill goroutines are stopped.
 
 ---
 
@@ -440,10 +526,11 @@ type Message[T any] struct {
     Topic     string
     Partition int32
     Offset    int64
+    Timestamp time.Time
 }
 ```
 
-Message is the core data unit flowing through a pipeline. It carries the payload (`Value` of any type `T`), routing metadata (`Key`, `Topic`, `Partition`, `Offset`), and application headers.
+Message is the core data unit flowing through a pipeline. It carries the payload (`Value` of any type `T`), routing metadata (`Key`, `Topic`, `Partition`, `Offset`, `Timestamp`), and application headers.
 
 **Lifecycle methods:**
 
@@ -496,6 +583,7 @@ type Sink[T any] interface {
     Open(ctx context.Context) error
     Close(ctx context.Context) error
     Write(ctx context.Context, msg Message[T]) error
+    Flush(ctx context.Context) error
 }
 ```
 
@@ -504,6 +592,7 @@ type Sink[T any] interface {
 | `Open`    | Initializes the connection to the broker. Called once when `Pipeline.Run()` starts. |
 | `Close`   | Tears down the connection. Called once when the pipeline exits. |
 | `Write`   | Publishes the message to the broker. Should honour context cancellation for timeout support. |
+| `Flush`   | Flushes any buffered writes. Called on pipeline shutdown. |
 
 **Implementations:**
 
@@ -525,11 +614,22 @@ Connects a `Source[T]` to a `Sink[T]` with optional transforms, retry, and backp
 
 **Configuration methods (all return `*Pipeline[T]` for chaining):**
 
-| Method                       | Description |
-|------------------------------|-------------|
-| `WithRetryConfig(cfg)`       | Set retry parameters for source reads and sink writes. |
-| `WithBackpressure(cfg)`      | Enable token-bucket rate limiting. |
-| `AddTransform(fn)`           | Append a processing function to the transform chain. |
+| Method                             | Description |
+|------------------------------------|-------------|
+| `WithRetryConfig(cfg)`             | Set retry parameters for source reads and sink writes. |
+| `WithBackpressure(cfg)`            | Enable token-bucket rate limiting (global or per-sink). |
+| `WithBatchConfig(cfg)`             | Enable batching (size and/or interval). |
+| `WithWindow(cfg)`                  | Enable windowing (tumbling, sliding, session, count). |
+| `WithMetrics(m)`                   | Attach a metrics collector. |
+| `WithDLQ(sink)`                    | Set a dead-letter queue for failed messages. |
+| `WithErrorHandler(h)`              | Set an error handler for read/transform/write errors. |
+| `WithState(state)`                 | Attach state for stateful transforms. |
+| `WithWorkers(n)`                   | Set concurrency level (reader + N workers). |
+| `AddTransform(fn)`                 | Append a processing function to the transform chain. |
+| `AddSink(sink)`                    | Fan-out to an additional sink. |
+| `Filter(fn)`                       | Append a filter transform (returns ErrSkip to drop). |
+| `FlatMap(fn)`                      | Append a flat-map transform (one-to-many). |
+| `Split(routes, sinks)`             | Route messages to different sinks based on content. |
 
 **Execution:**
 
@@ -538,9 +638,9 @@ func (p *Pipeline[T]) Run(ctx context.Context) error
 ```
 
 Run starts the pipeline loop:
-1. Opens the source and sink.
-2. Repeatedly: Read → [backpressure.Wait] → [retry Read] → [transforms] → [retry Write] → Ack.
-3. On context cancellation or unrecoverable error: closes source and sink, then returns.
+1. Opens the source and all sinks.
+2. Repeatedly: Read → [backpressure.Wait] → [retry Read] → [transforms/filter/flatMap] → [window/batch] → [retry Write] → Ack.
+3. On context cancellation or unrecoverable error: flushes all sinks, closes source and sinks, then returns.
 
 ### `stream.RetryConfig`
 
@@ -566,16 +666,134 @@ Applies to both source reads and sink writes independently within the pipeline.
 
 ```go
 type BackpressureConfig struct {
-    Rate  int  // tokens per second
-    Burst int  // maximum accumulated tokens
+    Rate    int  // tokens per second
+    Burst   int  // maximum accumulated tokens
+    PerSink bool // create a separate limiter per sink (for fan-out)
 }
 
-func DefaultBackpressureConfig() BackpressureConfig // Rate: 1000, Burst: 100
+func DefaultBackpressureConfig() BackpressureConfig // Rate: 1000, Burst: 100, PerSink: false
 ```
 
 **Validation rules:**
 - `Rate > 0`
 - `Burst > 0`
+
+When `PerSink` is true and the pipeline has multiple sinks, each sink gets its own independent token bucket.
+
+### `stream.BatchConfig`
+
+```go
+type BatchConfig struct {
+    Size     int           // messages per batch (0 = disabled)
+    Interval time.Duration // max wait before flushing batch (0 = disabled)
+}
+```
+
+When `Size > 0`, messages are buffered until the batch reaches the target size. When `Interval > 0`, the batch is also flushed periodically even if not full. Both can be combined.
+
+### `stream.WindowConfig`
+
+```go
+type WindowType int
+
+const (
+    WindowTypeTumbling WindowType = iota
+    WindowTypeSliding
+    WindowTypeSession
+    WindowTypeCount
+)
+
+type WindowConfig struct {
+    Type       WindowType
+    Size       time.Duration // window length (tumbling, sliding)
+    Slide      time.Duration // slide interval (sliding only)
+    Count      int           // message count threshold (count only)
+    SessionGap time.Duration // inactivity gap (session only)
+    Offset     time.Duration // alignment offset
+}
+
+func DefaultWindowConfig() WindowConfig // tumbling, 10s Size
+```
+
+**Window types:**
+
+| Type      | Trigger condition                                          |
+|-----------|------------------------------------------------------------|
+| Tumbling  | Fixed non-overlapping intervals of `Size` duration.        |
+| Sliding   | Overlapping windows of `Size` duration, advancing by `Slide`. |
+| Session   | Closes window when gap between messages exceeds `SessionGap`. |
+| Count     | Emits after `Count` messages accumulated.                  |
+
+### `stream.State` (Checkpointing)
+
+```go
+type State interface {
+    Get(ctx context.Context, key []byte) ([]byte, error)
+    Set(ctx context.Context, key []byte, value []byte) error
+    Delete(ctx context.Context, key []byte) error
+    Snapshot(ctx context.Context) ([]byte, error)
+    Restore(ctx context.Context, data []byte) error
+}
+```
+
+Built-in implementation: `InMemoryState` — concurrent-safe, supports JSON snapshot/restore for checkpointing.
+
+### `stream.StatefulTransform`
+
+```go
+type StatefulTransform[T any] struct {
+    State State
+    Fn    func(ctx context.Context, msg Message[T], state State) (Message[T], error)
+}
+```
+
+Use with `WithState()` on the pipeline to maintain state across messages (e.g., aggregations, deduplication).
+
+### `stream.FlatMapFunc`
+
+```go
+type FlatMapFunc[T any] func(ctx context.Context, msg Message[T]) ([]Message[T], error)
+```
+
+A flat-map transform produces zero, one, or many output messages from a single input. Use via `pipeline.FlatMap(fn)`.
+
+### `stream.ErrorHandler`
+
+```go
+type ErrorHandler interface {
+    OnTransformError(ctx context.Context, msg Message[[]byte], err error)
+    OnWriteError(ctx context.Context, msg Message[[]byte], err error)
+    OnReadError(ctx context.Context, err error)
+}
+```
+
+Use `ErrorHandlerFunc` for inline handlers. Attach via `pipeline.WithErrorHandler(h)`.
+
+### `stream.Metrics`
+
+```go
+type Metrics interface {
+    MessageRead(topic string)
+    MessageWritten(topic string)
+    MessageFailed(topic string, err error)
+    TransformError(topic string)
+    MessageRetried(topic string, attempt int)
+    BackpressureWait(topic string, d time.Duration)
+}
+```
+
+Built-in implementations: `NoopMetrics` (default), `MetricsCounter` (atomic counters). Attach via `pipeline.WithMetrics(m)`.
+
+### Adapters
+
+| Adapter        | Description                                        |
+|----------------|----------------------------------------------------|
+| `MergeSource`  | Fan-in: merges multiple sources into one           |
+| `MapSource`    | Transforms source output type                      |
+| `MapSink`      | Transforms sink input type                         |
+| `AsStream`     | Converts `Source[T]` to `<-chan Message[T]`        |
+| `BatchRead`    | Reads N messages from a source at once             |
+| `ReadAll`      | Reads all messages until error/context done        |
 
 ---
 
@@ -730,10 +948,12 @@ The test suite covers:
 |---------------------------|-------------------------------------------------------|
 | **Message**               | Construction, Ack/Nack with/without callbacks, context cancellation, type safety with int/struct/bytes. |
 | **RetryConfig**           | Validation (negative values, zero, base > max), defaults. |
-| **DoWithRetry**           | Immediate success, eventual success after N failures, permanent failure, context cancellation, zero retries. |
+| **DoWithRetry**           | Immediate success, eventual success after N failures, permanent failure, context cancellation, zero retries, non-retryable skips retry, retryable gets retries. |
 | **BackpressureConfig**    | Validation (zero rate/burst, negative rate), defaults. |
 | **Backpressure**          | Allow consumption up to burst, deny after burst exhausted, Wait block until timeout, context cancellation during Wait, idempotent Close. |
-| **Pipeline**              | Basic (3 messages through), single transform, chained transforms, transform error skips message, source/sink open errors, backpressure integration, context cancellation propagation, retry on source/sink errors, 100-message concurrent throughput, cleanup on write error, empty transform chain. |
+| **WindowConfig**          | Validation for all 4 types (tumbling, sliding, session, count), defaults, WindowType.String(). |
+| **Pipeline**              | Basic, single/chained transforms, transform error skips, source/sink open errors, backpressure, context cancellation, retry on source/sink errors, 100-message concurrent throughput, cleanup, empty transform chain, batch (size + fan-out), DLQ (success + failure), metrics (counter + transform errors + DLQ failures), flush on shutdown, nil metrics, context cancel during batch, per-sink backpressure, Ack/Nack callbacks, FlatMap, FlatMap with filter, count/session/sliding/tumbling windows, merge source, stateful transform. |
+| **State**                 | Snapshot/Restore with data and empty state. |
 | **Mocks**                 | Read error returns error, Written() returns snapshot (concurrent-safe). |
 
 ### Integration tests (require running broker)
@@ -796,7 +1016,7 @@ Run the full example:
 go run ./examples/pipeline/
 ```
 
-This starts three goroutines, each running a pipeline for Kafka, Kinesis, and RabbitMQ respectively. All listen for SIGINT/SIGTERM for graceful shutdown. Note: each broker requires its own running infrastructure.
+This starts goroutines running pipelines for Kafka, Kinesis, RabbitMQ, and a FlatMap example. All listen for SIGINT/SIGTERM for graceful shutdown. Note: each broker requires its own running infrastructure.
 
 ---
 

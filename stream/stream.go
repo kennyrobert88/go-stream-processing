@@ -1,6 +1,9 @@
 package stream
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Message[T any] struct {
 	Key       []byte
@@ -9,10 +12,12 @@ type Message[T any] struct {
 	Topic     string
 	Partition int32
 	Offset    int64
+	Timestamp time.Time
 
 	ackFn  func(context.Context) error
 	nackFn func(context.Context) error
 }
+
 
 func NewMessage[T any](value T) Message[T] {
 	return Message[T]{Value: value}
@@ -47,6 +52,12 @@ type Sink[T any] interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
 	Write(ctx context.Context, msg Message[T]) error
+	Flush(ctx context.Context) error
 }
 
 type TransformFunc[T any] func(ctx context.Context, msg Message[T]) (Message[T], error)
+
+type Streamer[T any] interface {
+	Source[T]
+	Stream(ctx context.Context) <-chan Message[T]
+}

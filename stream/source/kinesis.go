@@ -16,6 +16,19 @@ type KinesisSourceConfig struct {
 	Region     string
 }
 
+type KinesisSourceOption func(*KinesisSourceConfig)
+
+func WithStreamName(name string) KinesisSourceOption {
+	return func(c *KinesisSourceConfig) { c.StreamName = name }
+}
+func WithRegion(region string) KinesisSourceOption {
+	return func(c *KinesisSourceConfig) { c.Region = region }
+}
+
+func DefaultKinesisSourceConfig() KinesisSourceConfig {
+	return KinesisSourceConfig{}
+}
+
 type KinesisSource struct {
 	cfg    KinesisSourceConfig
 	client *kinesis.Client
@@ -26,10 +39,18 @@ func NewKinesisSource(cfg KinesisSourceConfig) *KinesisSource {
 	return &KinesisSource{cfg: cfg}
 }
 
+func NewKinesisSourceWithOptions(opts ...KinesisSourceOption) *KinesisSource {
+	cfg := DefaultKinesisSourceConfig()
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return &KinesisSource{cfg: cfg}
+}
+
 func (s *KinesisSource) Open(ctx context.Context) error {
 	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(s.cfg.Region))
 	if err != nil {
-		return fmt.Errorf("kinesis source config: %w", err)
+		return stream.NewNonRetryableError(fmt.Errorf("kinesis source config: %w", err))
 	}
 	s.client = kinesis.NewFromConfig(awsCfg)
 
@@ -37,10 +58,10 @@ func (s *KinesisSource) Open(ctx context.Context) error {
 		StreamName: aws.String(s.cfg.StreamName),
 	})
 	if err != nil {
-		return fmt.Errorf("kinesis source list shards: %w", err)
+		return stream.NewRetryableError(fmt.Errorf("kinesis source list shards: %w", err))
 	}
 	if len(shards.Shards) == 0 {
-		return fmt.Errorf("kinesis source: no shards found")
+		return stream.NewNonRetryableError(fmt.Errorf("kinesis source: no shards found"))
 	}
 	s.shard = aws.ToString(shards.Shards[0].ShardId)
 	return nil
@@ -55,10 +76,10 @@ func (s *KinesisSource) Read(ctx context.Context) (stream.Message[[]byte], error
 		ShardIterator: aws.String(s.shard),
 	})
 	if err != nil {
-		return stream.Message[[]byte]{}, fmt.Errorf("kinesis source read: %w", err)
+		return stream.Message[[]byte]{}, stream.NewRetryableError(fmt.Errorf("kinesis source read: %w", err))
 	}
 	if len(records.Records) == 0 {
-		return stream.Message[[]byte]{}, fmt.Errorf("kinesis source: no records")
+		return stream.Message[[]byte]{}, stream.NewRetryableError(fmt.Errorf("kinesis source: no records"))
 	}
 	rec := records.Records[0]
 	key := aws.ToString(rec.PartitionKey)

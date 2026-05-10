@@ -34,6 +34,8 @@ func (s *KinesisSink) Open(ctx context.Context) error {
 	return nil
 }
 
+func (s *KinesisSink) Flush(_ context.Context) error { return nil }
+
 func (s *KinesisSink) Close(_ context.Context) error {
 	return nil
 }

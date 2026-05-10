@@ -62,6 +62,8 @@ func (s *MockSink[T]) Close(_ context.Context) error {
 	return s.CloseErr
 }
 
+func (s *MockSink[T]) Flush(_ context.Context) error { return nil }
+
 func (s *MockSink[T]) Write(_ context.Context, msg stream.Message[T]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
