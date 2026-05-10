@@ -24,11 +24,11 @@ func NewKafkaSink(cfg KafkaSinkConfig) *KafkaSink {
 }
 
 func (s *KafkaSink) Open(_ context.Context) error {
-	s.writer = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:  s.cfg.Brokers,
+	s.writer = &kafka.Writer{
+		Addr:     kafka.TCP(s.cfg.Brokers...),
 		Topic:    s.cfg.Topic,
 		Balancer: &kafka.LeastBytes{},
-	})
+	}
 	return nil
 }
 
