@@ -10,18 +10,31 @@ import (
 )
 
 type PubSubSinkConfig struct {
-	ProjectID string
-	TopicID   string
+	ProjectID           string
+	TopicID             string
+	NumGoroutines       int
+	MaxOutstandingBytes int
 }
 
 type PubSubSink struct {
 	cfg    PubSubSinkConfig
 	client *pubsub.Client
 	topic  *pubsub.Topic
+	cb     *stream.CircuitBreaker
+	logger stream.Logger
 }
 
 func NewPubSubSink(cfg PubSubSinkConfig) *PubSubSink {
-	return &PubSubSink{cfg: cfg}
+	return &PubSubSink{
+		cfg:    cfg,
+		cb:     stream.NewCircuitBreaker(stream.DefaultCircuitBreakerConfig("pubsub-sink")),
+		logger: &stream.NopLogger{},
+	}
+}
+
+func (s *PubSubSink) WithLogger(l stream.Logger) *PubSubSink {
+	s.logger = l
+	return s
 }
 
 func (s *PubSubSink) Open(ctx context.Context) error {
@@ -31,30 +44,46 @@ func (s *PubSubSink) Open(ctx context.Context) error {
 	}
 	s.client = client
 	s.topic = client.Topic(s.cfg.TopicID)
-	s.topic.PublishSettings.NumGoroutines = 1
+	if s.cfg.NumGoroutines > 0 {
+		s.topic.PublishSettings.NumGoroutines = s.cfg.NumGoroutines
+	} else {
+		s.topic.PublishSettings.NumGoroutines = 10
+	}
+	s.topic.PublishSettings.BufferedByteLimit = s.cfg.MaxOutstandingBytes
+	s.logger.Info(ctx, "pubsub sink connected",
+		"project", s.cfg.ProjectID,
+		"topic", s.cfg.TopicID,
+	)
 	return nil
 }
 
 func (s *PubSubSink) Flush(_ context.Context) error { return nil }
 
-func (s *PubSubSink) Close(_ context.Context) error {
+func (s *PubSubSink) Close(ctx context.Context) error {
+	if s.topic != nil {
+		s.topic.Stop()
+	}
 	if s.client != nil {
-		return s.client.Close()
+		err := s.client.Close()
+		s.logger.Info(ctx, "pubsub sink closed")
+		return err
 	}
 	return nil
 }
 
 func (s *PubSubSink) Write(ctx context.Context, msg stream.Message[[]byte]) error {
-	attrs := make(map[string]string, len(msg.Headers))
-	for k, v := range msg.Headers {
-		attrs[k] = string(v)
-	}
-	result := s.topic.Publish(ctx, &pubsub.Message{
-		Data:       msg.Value,
-		Attributes: attrs,
+	return s.cb.Execute(ctx, func(ctx context.Context) error {
+		attrs := make(map[string]string, len(msg.Headers))
+		for k, v := range msg.Headers {
+			attrs[k] = string(v)
+		}
+		result := s.topic.Publish(ctx, &pubsub.Message{
+			Data:       msg.Value,
+			Attributes: attrs,
+		})
+		if _, err := result.Get(ctx); err != nil {
+			return fmt.Errorf("pubsub sink publish: %w", err)
+		}
+		return nil
 	})
-	if _, err := result.Get(ctx); err != nil {
-		return fmt.Errorf("pubsub sink publish: %w", err)
-	}
-	return nil
 }

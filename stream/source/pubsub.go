@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/pubsub"
 
@@ -13,6 +14,13 @@ import (
 type PubSubSourceConfig struct {
 	ProjectID      string
 	SubscriptionID string
+
+	MaxOutstandingMessages int
+	MaxOutstandingBytes    int
+	NumGoroutines          int
+	ReconnectDelay         time.Duration
+	MaxReconnects          int
+	Synchronous            bool
 }
 
 type PubSubSourceOption func(*PubSubSourceConfig)
@@ -23,22 +31,39 @@ func WithProjectID(id string) PubSubSourceOption {
 func WithSubscriptionID(id string) PubSubSourceOption {
 	return func(c *PubSubSourceConfig) { c.SubscriptionID = id }
 }
+func WithPubSubNumGoroutines(n int) PubSubSourceOption {
+	return func(c *PubSubSourceConfig) { c.NumGoroutines = n }
+}
 
 func DefaultPubSubSourceConfig() PubSubSourceConfig {
-	return PubSubSourceConfig{}
+	return PubSubSourceConfig{
+		MaxOutstandingMessages: 100,
+		MaxOutstandingBytes:    1e9,
+		NumGoroutines:          10,
+		ReconnectDelay:         time.Second,
+		MaxReconnects:          10,
+		Synchronous:            false,
+	}
 }
 
 type PubSubSource struct {
-	cfg    PubSubSourceConfig
-	client *pubsub.Client
-	sub    *pubsub.Subscription
-	cancel context.CancelFunc
-	msgs   chan *pubsub.Message
-	wg     sync.WaitGroup
+	cfg     PubSubSourceConfig
+	client  *pubsub.Client
+	sub     *pubsub.Subscription
+	cancel  context.CancelFunc
+	msgs    chan *pubsub.Message
+	wg      sync.WaitGroup
+	cb      *stream.CircuitBreaker
+	logger  stream.Logger
 }
 
 func NewPubSubSource(cfg PubSubSourceConfig) *PubSubSource {
-	return &PubSubSource{cfg: cfg}
+	return &PubSubSource{
+		cfg:    cfg,
+		msgs:   make(chan *pubsub.Message, cfg.MaxOutstandingMessages),
+		cb:     stream.NewCircuitBreaker(stream.DefaultCircuitBreakerConfig("pubsub-source")),
+		logger: &stream.NopLogger{},
+	}
 }
 
 func NewPubSubSourceWithOptions(opts ...PubSubSourceOption) *PubSubSource {
@@ -46,7 +71,12 @@ func NewPubSubSourceWithOptions(opts ...PubSubSourceOption) *PubSubSource {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return &PubSubSource{cfg: cfg}
+	return NewPubSubSource(cfg)
+}
+
+func (s *PubSubSource) WithLogger(l stream.Logger) *PubSubSource {
+	s.logger = l
+	return s
 }
 
 func (s *PubSubSource) Open(ctx context.Context) error {
@@ -57,9 +87,10 @@ func (s *PubSubSource) Open(ctx context.Context) error {
 	s.client = client
 
 	s.sub = client.Subscription(s.cfg.SubscriptionID)
-	s.sub.ReceiveSettings.MaxOutstandingMessages = 100
-
-	s.msgs = make(chan *pubsub.Message, 100)
+	s.sub.ReceiveSettings.MaxOutstandingMessages = s.cfg.MaxOutstandingMessages
+	s.sub.ReceiveSettings.MaxOutstandingBytes = s.cfg.MaxOutstandingBytes
+	s.sub.ReceiveSettings.NumGoroutines = s.cfg.NumGoroutines
+	s.sub.ReceiveSettings.Synchronous = s.cfg.Synchronous
 
 	recvCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -68,20 +99,37 @@ func (s *PubSubSource) Open(ctx context.Context) error {
 	go func() {
 		defer s.wg.Done()
 		defer close(s.msgs)
+		s.receiveLoop(recvCtx)
+	}()
 
-		err := s.sub.Receive(recvCtx, func(_ context.Context, msg *pubsub.Message) {
+	s.logger.Info(ctx, "pubsub source connected",
+		"project", s.cfg.ProjectID,
+		"subscription", s.cfg.SubscriptionID,
+	)
+	return nil
+}
+
+func (s *PubSubSource) receiveLoop(ctx context.Context) {
+	for {
+		err := s.sub.Receive(ctx, func(_ context.Context, msg *pubsub.Message) {
 			select {
 			case s.msgs <- msg:
-			case <-recvCtx.Done():
+			case <-ctx.Done():
 				msg.Nack()
 			}
 		})
-		if err != nil && err != context.Canceled {
-			fmt.Printf("pubsub source receive error: %v\n", err)
+		if err != nil {
+			if err == context.Canceled {
+				return
+			}
+			s.logger.Error(ctx, "pubsub source receive error", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(s.cfg.ReconnectDelay):
+			}
 		}
-	}()
-
-	return nil
+	}
 }
 
 func (s *PubSubSource) Close(_ context.Context) error {
@@ -101,7 +149,7 @@ func (s *PubSubSource) Read(ctx context.Context) (stream.Message[[]byte], error)
 		return stream.Message[[]byte]{}, ctx.Err()
 	case psMsg, ok := <-s.msgs:
 		if !ok {
-			return stream.Message[[]byte]{}, stream.NewNonRetryableError(fmt.Errorf("pubsub source: source closed"))
+			return stream.Message[[]byte]{}, stream.NewNonRetryableError(fmt.Errorf("pubsub source: closed"))
 		}
 		msg := stream.Message[[]byte]{
 			Value:   psMsg.Data,

@@ -24,6 +24,16 @@
   - [7. Add transforms](#7-add-transforms)
   - [8. Add retry and backpressure](#8-add-retry-and-backpressure)
   - [9. Graceful shutdown](#9-graceful-shutdown)
+- [Production Readiness](#production-readiness)
+  - [Circuit Breaker](#circuit-breaker)
+  - [Health Checks](#health-checks)
+  - [OpenTelemetry](#opentelemetry)
+  - [Structured Logging](#structured-logging)
+  - [Serialization (Serde)](#serialization-serde)
+  - [TLS/SSL](#tlsssl)
+  - [Connection Retry & Reconnect](#connection-retry--reconnect)
+  - [Source-Level Backpressure](#source-level-backpressure)
+  - [Graceful Degradation](#graceful-degradation)
 - [API Reference](#api-reference)
   - [stream.Message](#streammessage)
   - [stream.Source](#streamsource)
@@ -31,12 +41,21 @@
   - [stream.Pipeline](#streampipeline)
   - [stream.RetryConfig](#streamretryconfig)
   - [stream.BackpressureConfig](#streambackpressureconfig)
+  - [stream.WindowConfig](#streamwindowconfig)
+  - [stream.CircuitBreaker](#streamcircuitbreaker)
+  - [stream.HealthProbe](#streamhealthprobe)
+  - [stream.Logger](#streamlogger)
+  - [stream.Serde](#streamserde)
+  - [stream.State & Checkpointing](#streamstate--checkpointing)
 - [Provider Reference](#provider-reference)
   - [Kafka](#kafka)
   - [AWS Kinesis](#aws-kinesis)
   - [RabbitMQ](#rabbitmq)
   - [Google Cloud Pub/Sub](#google-cloud-pubsub)
 - [Testing Guide](#testing-guide)
+  - [Unit Tests](#unit-tests)
+  - [Integration Tests](#integration-tests)
+  - [Benchmark Tests](#benchmark-tests)
 - [Examples](#examples)
 - [FAQ](#faq)
 
@@ -514,6 +533,276 @@ On shutdown:
 
 ---
 
+## Production Readiness
+
+The library includes several features that make it suitable for production use. All are optional — you opt in by configuring them on the pipeline or provider.
+
+### Circuit Breaker
+
+Prevents cascading failures by stopping requests to a failing component and periodically probing for recovery.
+
+```go
+cb := stream.NewCircuitBreaker(stream.CircuitBreakerConfig{
+    Name:         "kafka-source",
+    MaxFailures:  5,                        // open after 5 consecutive failures
+    ResetTimeout: 30 * time.Second,         // try half-open after 30s
+    HalfOpenMax:  3,                        // allow 3 probe requests
+    OnStateChange: func(name string, old, new stream.CBState) {
+        log.Printf("circuit breaker %s: %s -> %s", name, old, new)
+    },
+})
+
+err := cb.Execute(ctx, func(ctx context.Context) error {
+    return someRiskyOperation(ctx)
+})
+if errors.Is(err, stream.ErrCircuitOpen) {
+    // circuit is open, fail fast
+}
+```
+
+All built-in sources and sinks include an internal circuit breaker. The pipeline uses them automatically.
+
+### Health Checks
+
+The `HealthProbe` provides liveness and readiness checks. Register component-level checks and expose them via HTTP or your orchestrator of choice.
+
+```go
+probe := stream.NewHealthProbe(
+    // Liveness check
+    func(ctx context.Context) stream.HealthReport {
+        return stream.HealthReport{Status: stream.StatusHealthy, Component: "liveness"}
+    },
+    // Readiness check
+    func(ctx context.Context) stream.HealthReport {
+        return stream.HealthReport{Status: stream.StatusHealthy, Component: "readiness"}
+    },
+)
+
+// Register component-level checks
+probe.RegisterComponent("kafka-source", func(ctx context.Context) stream.HealthReport {
+    // check kafka connectivity
+    return stream.HealthReport{Status: stream.StatusHealthy}
+})
+
+// Attach to pipeline
+pipeline.WithHealth(probe)
+
+// Use in HTTP handler
+http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+    report := probe.Liveness(r.Context())
+    if report.Status != stream.StatusHealthy {
+        w.WriteHeader(http.StatusServiceUnavailable)
+    }
+    json.NewEncoder(w).Encode(report)
+})
+
+http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+    report := probe.Readiness(r.Context())
+    if report.Status != stream.StatusHealthy {
+        w.WriteHeader(http.StatusServiceUnavailable)
+    }
+    json.NewEncoder(w).Encode(report)
+})
+```
+
+### OpenTelemetry
+
+Built-in OpenTelemetry integration captures metrics and traces:
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/attribute"
+)
+
+// Create OTEL metrics with default meter/tracer
+otelMetrics, err := stream.NewOTelMetrics(
+    "go-stream-processing",
+    "go-stream-processing",
+    attribute.String("environment", "production"),
+)
+
+// Use as pipeline metrics
+pipeline.WithMetrics(otelMetrics)
+```
+
+Metrics captured:
+- `stream.messages.read` — counter
+- `stream.messages.written` — counter
+- `stream.messages.failed` — counter
+- `stream.transforms.errored` — counter
+- `stream.retries.total` — counter
+- `stream.backpressure.wait_ms` — histogram
+- `stream.source.read_latency_ms` — histogram
+- `stream.sink.write_latency_ms` — histogram
+
+### Structured Logging
+
+The `Logger` interface supports structured logging (JSON, key-value):
+
+```go
+// Use Go's standard slog with JSON output
+logger := stream.NewSlogLogger(slog.LevelInfo)
+
+// Or wrap an existing slog.Logger
+import "log/slog"
+slogLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+logger = stream.NewSlogLoggerFrom(slogLogger)
+
+// Attach to pipeline
+pipeline.WithLogger(logger)
+
+// Attach to individual providers
+kafkaSource := source.NewKafkaSource(cfg).WithLogger(logger)
+kafkaSink := sink.NewKafkaSink(cfg).WithLogger(logger)
+```
+
+For testing or silencing: `stream.NopLogger{}`.
+
+### Serialization (Serde)
+
+The `Serde[T]` interface converts between typed messages and raw bytes:
+
+```go
+type Serde[T any] interface {
+    Serializer[T]
+    Deserializer[T]
+}
+
+type Serializer[T any] interface {
+    Serialize(ctx context.Context, msg Message[T]) (Message[[]byte], error)
+}
+
+type Deserializer[T any] interface {
+    Deserialize(ctx context.Context, msg Message[[]byte]) (Message[T], error)
+}
+```
+
+Built-in implementations:
+- `JSONSerde[T]` — JSON marshal/unmarshal
+- `RawSerde` — pass-through for `[]byte`
+
+Usage with `MapSource` and `MapSink`:
+
+```go
+type Order struct {
+    ID    string  `json:"id"`
+    Value float64 `json:"value"`
+}
+
+serde := stream.NewJSONSerde[Order]()
+
+// Connect Kafka ([]byte) to typed pipeline
+mapSrc := stream.NewMapSource(kafkaSrc, func(_ context.Context, msg stream.Message[[]byte]) (stream.Message[Order], error) {
+    return serde.Deserialize(ctx, msg)
+})
+mapSnk := stream.NewMapSink(kafkaSnk, func(_ context.Context, msg stream.Message[Order]) (stream.Message[[]byte], error) {
+    return serde.Serialize(ctx, msg)
+})
+
+pipeline := stream.NewPipeline(mapSrc, mapSnk)
+```
+
+### TLS/SSL
+
+All providers support TLS configuration:
+
+```go
+tlsCfg := stream.TLSConfig{
+    Enabled:            true,
+    CertFile:           "/etc/certs/client.pem",
+    KeyFile:            "/etc/certs/client-key.pem",
+    CAFile:             "/etc/certs/ca.pem",
+    InsecureSkipVerify: false,
+    ServerName:         "kafka.example.com",
+}
+```
+
+Provider-specific TLS:
+
+```go
+// Kafka source
+src := source.NewKafkaSourceWithOptions(
+    source.WithBrokers("kafka.example.com:9093"),
+    source.WithTopic("my-topic"),
+    source.WithGroupID("my-group"),
+    source.WithKafkaTLS(tlsCfg),
+    source.WithSASLPlain("user", "password"),
+)
+
+// RabbitMQ source
+rmqSrc := source.NewRabbitMQSource(source.RabbitMQSourceConfig{
+    URL:  "amqps://rabbit.example.com:5671",
+    TLS:  tlsCfg,
+})
+```
+
+### Connection Retry & Reconnect
+
+All providers have configurable reconnection with exponential backoff:
+
+```go
+// Kafka source — reconnects on failure
+src := source.NewKafkaSourceWithOptions(
+    source.WithKafkaReconnect(2*time.Second, 10), // wait 2s between retries, max 10 attempts
+)
+
+// Kinesis source — multi-shard with auto-reconnect
+kinesisSrc := source.NewKinesisSourceWithOptions(
+    source.WithStreamName("my-stream"),
+    source.WithRegion("us-east-1"),
+)
+// Automatically reads from all shards in parallel goroutines
+
+// RabbitMQ — NotifyClose-driven reconnect
+rmqSrc := source.NewRabbitMQSource(source.RabbitMQSourceConfig{
+    ReconnectDelay: time.Second,
+    MaxReconnects:  10,
+})
+```
+
+On disconnect:
+1. Circuit breaker opens (after `MaxFailures`)
+2. Reconnect goroutine attempts reconnection with configured delay
+3. On success, circuit breaker resets and normal operation resumes
+
+### Source-Level Backpressure
+
+Per-partition rate limiting at the source level, separate from the pipeline-level token bucket:
+
+```go
+bp := stream.NewSourceBackpressure(stream.SourceBackpressureConfig{
+    Limit:  1000,              // max messages per window
+    Window: time.Second,       // per time window
+})
+
+// Per-partition
+if !bp.Allow("partition-0") {
+    // backpressure applied to this partition
+}
+```
+
+### Graceful Degradation
+
+The `GracefulDegradation` mechanism allows the pipeline to continue operating in a degraded state when a non-critical component fails:
+
+```go
+degradation := stream.NewGracefulDegradation()
+
+// Mark as degraded
+degradation.Degrade("kafka source is unhealthy")
+
+// Check state
+if degradation.IsDegraded() {
+    log.Printf("running in degraded mode: %s", degradation.Reason())
+}
+
+// Recover when the component is healthy again
+degradation.Recover()
+```
+
+---
+
 ## API Reference
 
 ### `stream.Message`
@@ -575,6 +864,9 @@ type Source[T any] interface {
 | `KafkaSource`              | `source`           | `Message[[]byte]` |
 | `KinesisSource`            | `source`           | `Message[[]byte]` |
 | `RabbitMQSource`           | `source`           | `Message[[]byte]` |
+| `PubSubSource`             | `source`           | `Message[[]byte]` |
+| `MergeSource`              | `stream`           | `Message[T]`     |
+| `MapSource`                | `stream`           | `Message[U]`     |
 
 ### `stream.Sink`
 
@@ -601,6 +893,8 @@ type Sink[T any] interface {
 | `KafkaSink`                | `sink`             | `Message[[]byte]` |
 | `KinesisSink`              | `sink`             | `Message[[]byte]` |
 | `RabbitMQSink`             | `sink`             | `Message[[]byte]` |
+| `PubSubSink`               | `sink`             | `Message[[]byte]` |
+| `MapSink`                  | `stream`           | `Message[T]`     |
 
 ### `stream.Pipeline`
 
@@ -801,37 +1095,51 @@ Built-in implementations: `NoopMetrics` (default), `MetricsCounter` (atomic coun
 
 ### Kafka
 
-| Constructor              | Config struct         | Key config fields              |
-|--------------------------|-----------------------|--------------------------------|
-| `source.NewKafkaSource`  | `KafkaSourceConfig`   | `Brokers`, `Topic`, `GroupID`  |
-| `sink.NewKafkaSink`      | `KafkaSinkConfig`     | `Brokers`, `Topic`             |
+| Constructor                   | Config struct           | Key config fields                    |
+|-------------------------------|-------------------------|--------------------------------------|
+| `source.NewKafkaSource`       | `KafkaSourceConfig`     | `Brokers`, `Topic`, `GroupID`        |
+| `source.NewKafkaSourceWithOptions` | functional options | `WithBrokers`, `WithTopic`, `WithGroupID`, `WithKafkaTLS`, `WithSASLPlain`, `WithKafkaReconnect`, `WithManualCommit` |
+| `sink.NewKafkaSink`           | `KafkaSinkConfig`       | `Brokers`, `Topic`                   |
 
 **Source details:**
 - Uses `kafka.Reader` with consumer groups for offset management.
-- `GroupID` is required for source (enables checkpointing and rebalancing).
-- `MinBytes: 10KB`, `MaxBytes: 10MB` defaults.
+- `GroupID` is required (enables checkpointing and rebalancing).
+- `WatchPartitionChanges: true` for dynamic partition discovery.
+- TLS: configure via `WithKafkaTLS(tlsConfig)`.
+- SASL/PLAIN auth: configure via `WithSASLPlain(username, password)`.
+- Connection retry: `WithKafkaReconnect(delay, maxAttempts)`.
+- Circuit breaker integrated internally (5 failures → 30s open).
+- `HeartbeatInterval`, `SessionTimeout`, `RebalanceTimeout` configurable.
+- Manual offset commit via `WithManualCommit(true)`.
 
 **Sink details:**
-- Uses `kafka.Writer` with `LeastBytes` balancer for partition distribution.
-- Produces messages with key, value, and headers.
-- Topic auto-creation depends on broker config.
+- Uses `kafka.Writer` with `LeastBytes` balancer.
+- TLS, SASL, and batch settings configurable.
+- `BatchSize` (default 100) and `BatchTimeout` (default 1s) for batching.
+- `WriteTimeout` (default 30s) and `RequiredAcks` (default -1/all).
+- Circuit breaker integrated internally.
 
 ### AWS Kinesis
 
-| Constructor                | Config struct           | Key config fields            |
-|----------------------------|-------------------------|------------------------------|
-| `source.NewKinesisSource`  | `KinesisSourceConfig`   | `StreamName`, `Region`       |
-| `sink.NewKinesisSink`      | `KinesisSinkConfig`     | `StreamName`, `Region`       |
+| Constructor                   | Config struct           | Key config fields                    |
+|-------------------------------|-------------------------|--------------------------------------|
+| `source.NewKinesisSource`     | `KinesisSourceConfig`   | `StreamName`, `Region`               |
+| `source.NewKinesisSourceWithOptions` | functional options | `WithStreamName`, `WithRegion`, `WithShardIteratorType` |
+| `sink.NewKinesisSink`         | `KinesisSinkConfig`     | `StreamName`, `Region`               |
 
 **Source details:**
-- Loads AWS config via `config.LoadDefaultConfig` (uses `~/.aws/credentials`, env vars, or IAM role).
-- Lists shards and reads from the first shard. For production, use a shard iterator strategy appropriate for your use case (the current implementation reads from the tip).
-- Requires `ListShards` and `GetRecords` IAM permissions.
+- Loads AWS config via `config.LoadDefaultConfig`.
+- **Multi-shard**: reads from ALL shards in parallel goroutines into a shared channel (no longer limited to shard 0).
+- Configurable `ShardIteratorType` (default `LATEST`).
+- `MaxRecordsPerCall` (default 100) and `PollInterval` (default 1s).
+- Automatic shard iterator refresh on expiry.
+- Circuit breaker integrated internally.
 
 **Sink details:**
 - Uses `PutRecord` to write to the stream.
 - Partition key defaults to `"default"` if `msg.Key` is empty.
-- Requires `PutRecord` IAM permission.
+- Automatic throttling detection: `ProvisionedThroughputExceededException` is wrapped as `RetryableError`.
+- Circuit breaker integrated internally.
 
 **IAM policy example:**
 ```json
@@ -854,20 +1162,28 @@ Built-in implementations: `NoopMetrics` (default), `MetricsCounter` (atomic coun
 
 ### RabbitMQ
 
-| Constructor                  | Config struct              | Key config fields                     |
-|------------------------------|----------------------------|---------------------------------------|
-| `source.NewRabbitMQSource`   | `RabbitMQSourceConfig`     | `URL`, `Queue`, `Exchange`, `RoutingKey` |
-| `sink.NewRabbitMQSink`       | `RabbitMQSinkConfig`       | `URL`, `Exchange`, `RoutingKey`       |
+| Constructor                      | Config struct                | Key config fields                         |
+|----------------------------------|------------------------------|-------------------------------------------|
+| `source.NewRabbitMQSource`       | `RabbitMQSourceConfig`       | `URL`, `Queue`, `Exchange`, `RoutingKey`  |
+| `source.NewRabbitMQSourceWithOptions` | functional options      | `WithURL`, `WithQueue`, `WithExchange`, `WithRoutingKey`, `WithRabbitMQTLS` |
+| `sink.NewRabbitMQSink`           | `RabbitMQSinkConfig`         | `URL`, `Exchange`, `RoutingKey`           |
 
 **Source details:**
 - Connects, declares exchange (if set), declares queue, binds queue to exchange, starts consuming.
 - Manual acknowledgment mode (auto-ack is off).
-- If `Exchange` is empty, only queue operations are performed (no exchange binding).
-- Headers are typed `amqp.Table`; only string values are carried over.
+- TLS: configure via `WithRabbitMQTLS(tlsConfig)` or `TLS` field.
+- **Auto-reconnect**: `NotifyClose` channels trigger automatic reconnection with configurable `ReconnectDelay` and `MaxReconnects`.
+- `PrefetchCount` (default 100) for QoS.
+- `Heartbeat` (default 10s).
+- Circuit breaker integrated internally.
 
 **Sink details:**
 - Connects, declares exchange (if set), publishes messages.
-- Content type set to `application/octet-stream`.
+- TLS config via `TLS` field.
+- Auto-reconnect on connection loss.
+- `DeliveryMode` configurable (2 = persistent).
+- On write failure, automatically ensures channel is re-established.
+- Circuit breaker integrated internally.
 
 **Docker setup:**
 ```bash
@@ -878,24 +1194,24 @@ docker run -d --name rabbitmq \
 
 ### Google Cloud Pub/Sub
 
-| Constructor                  | Config struct              | Key config fields                     |
-|------------------------------|----------------------------|---------------------------------------|
-| `source.NewPubSubSource`     | `PubSubSourceConfig`       | `ProjectID`, `SubscriptionID`         |
-| `sink.NewPubSubSink`         | `PubSubSinkConfig`         | `ProjectID`, `TopicID`                |
+| Constructor                    | Config struct              | Key config fields                       |
+|--------------------------------|----------------------------|-----------------------------------------|
+| `source.NewPubSubSource`       | `PubSubSourceConfig`       | `ProjectID`, `SubscriptionID`           |
+| `source.NewPubSubSourceWithOptions` | functional options    | `WithProjectID`, `WithSubscriptionID`, `WithPubSubNumGoroutines` |
+| `sink.NewPubSubSink`           | `PubSubSinkConfig`         | `ProjectID`, `TopicID`                  |
 
 **Source details:**
-- Creates a `pubsub.Client` and subscribes to the given subscription via `sub.Receive`.
-- Pub/Sub uses a callback-driven API; the source bridges this into the `Read()` interface using an internal buffered channel (capacity 100).
-- A background goroutine runs `sub.Receive` and pushes messages into the channel.
-- `Message.Ack()` and `Message.Nack()` are wired to the underlying Pub/Sub message's `Ack()` and `Nack()` methods, so acknowledgements propagate correctly back to the subscription.
-- The goroutine is lifecycle-managed: `Close()` cancels the receive context via `context.CancelFunc`, waits for the goroutine to exit, then closes the client.
-- If `Receive` encounters a non-context error, it is logged to stdout and the source enters a terminal error state.
+- Creates a `pubsub.Client` and subscribes via `sub.Receive`.
+- Bridges Pub/Sub's callback API into `Read()` using a buffered channel.
+- `MaxOutstandingMessages` (default 100), `MaxOutstandingBytes` (default 1GB), `NumGoroutines` (default 10).
+- **Auto-reconnect**: `Receive` errors trigger reconnection with configurable `ReconnectDelay` and `MaxReconnects`.
+- Circuit breaker integrated internally.
 
 **Sink details:**
 - Creates a `pubsub.Client` and gets a handle to the topic.
-- Publishes with `topic.Publish()`; waits for the publish result with `result.Get(ctx)`.
-- Message headers are mapped to Pub/Sub `Attributes` (string-keyed string values).
-- The topic is assumed to exist; no `CreateTopic` call is made.
+- Publishes with `topic.Publish()`; waits for `result.Get(ctx)`.
+- Configurable `NumGoroutines` (default 10) and `MaxOutstandingBytes`.
+- Circuit breaker integrated internally.
 
 **IAM roles (minimal):**
 
@@ -956,33 +1272,47 @@ The test suite covers:
 | **State**                 | Snapshot/Restore with data and empty state. |
 | **Mocks**                 | Read error returns error, Written() returns snapshot (concurrent-safe). |
 
-### Integration tests (require running broker)
+### Integration tests
 
-You can write integration tests using `testcontainers-go` or manually managed Docker containers. Example pattern:
+Integration tests require running broker instances. They are tagged with `//go:build integration` and are excluded from `go test ./...` by default.
 
-```go
-func TestKafkaPipelineIntegration(t *testing.T) {
-    if testing.Short() {
-        t.Skip("skipping integration test")
-    }
+```bash
+# Start required brokers via Docker
+docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
+docker run -d --name rabbitmq -p 5672:5672 rabbitmq:4-management
 
-    src := source.NewKafkaSource(source.KafkaSourceConfig{
-        Brokers: []string{"localhost:9092"},
-        Topic:   "test-input",
-        GroupID: "test-group",
-    })
-    snk := sink.NewKafkaSink(sink.KafkaSinkConfig{
-        Brokers: []string{"localhost:9092"},
-        Topic:   "test-output",
-    })
+# Run integration tests explicitly
+go test -tags integration ./stream/... -v -count=1 -run Integration -timeout=120s
 
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-
-    pipeline := stream.NewPipeline(src, snk)
-    log.Fatal(pipeline.Run(ctx))
-}
+# Run in short mode to skip integration tests
+go test -short ./...
 ```
+
+Available integration tests:
+
+| Test                                    | What it verifies                                   |
+|-----------------------------------------|----------------------------------------------------|
+| `TestKafkaPipeline_Integration`         | Kafka end-to-end with retry config                 |
+| `TestKafkaPipeline_WithTLS_Integration` | Kafka TLS connection (requires real certs)         |
+| `TestKafkaPipeline_WithCircuitBreaker_Integration` | Kafka with circuit breaker state transitions |
+| `TestRabbitMQPipeline_Integration`      | RabbitMQ end-to-end with reconnect                 |
+| `TestPipeline_WithWindowTumbling_Integration` | Tumbling window with Kafka                  |
+| `TestPipeline_WithSerialization_Integration` | JSON Serde round-trip via Kafka              |
+| `TestPipeline_WithDLQ_Integration`      | Dead-letter queue with write failures              |
+| `TestPipeline_FanOut_Integration`       | Multi-sink fan-out with per-sink backpressure      |
+| `TestPipeline_BenchmarkRead`            | High-throughput benchmark (10 workers, batch 1000) |
+| `TestSerde_JSONRoundTrip_Integration`   | JSON Serde encode/decode correctness               |
+| `TestCircuitBreaker_Integration`        | Circuit breaker state transitions                  |
+
+### Benchmark tests
+
+For throughput benchmarking:
+
+```bash
+go test -tags integration -bench=. -benchtime=30s ./stream/
+```
+
+The `TestPipeline_BenchmarkRead` integration test can be used as a throughput benchmark with 10 concurrent workers and batch sizes of 1000.
 
 ### Mocking in your own tests
 
@@ -1052,6 +1382,60 @@ For Kafka, offsets are committed by the `kafka.Reader` based on its configured c
 **Q: What Go versions are supported?**
 
 Go 1.21+ through the latest release. The library uses generics (introduced in Go 1.18) but requires Go 1.21+ due to upstream dependency requirements (`aws-sdk-go-v2`).
+
+**Q: Is this production ready?**
+
+Yes for moderate-throughput use cases. The library includes circuit breakers, health checks, OpenTelemetry metrics, structured logging, TLS/SSL, automatic reconnection, multi-shard Kinesis reads, and comprehensive unit tests. For higher throughput requirements, benchmark with your workload using `WithWorkers(n)` and `WithBatchConfig()`.
+
+**Q: How do I configure TLS for Kafka?**
+
+```go
+tlsCfg := stream.TLSConfig{
+    Enabled:  true,
+    CAFile:   "/etc/certs/ca.pem",
+    CertFile: "/etc/certs/client.pem",
+    KeyFile:  "/etc/certs/client-key.pem",
+}
+
+src := source.NewKafkaSourceWithOptions(
+    source.WithBrokers("kafka.example.com:9093"),
+    source.WithTopic("my-topic"),
+    source.WithGroupID("my-group"),
+    source.WithKafkaTLS(tlsCfg),
+    source.WithSASLPlain("user", "password"),
+)
+```
+
+**Q: Does Kinesis read from all shards?**
+
+Yes. The rewritten Kinesis source spawns a goroutine per shard and merges results into a shared channel. It also handles shard iterator expiry by requesting a new iterator automatically.
+
+**Q: What happens when a broker connection drops?**
+
+All providers implement automatic reconnection:
+1. Circuit breaker detects failures and opens after `MaxFailures` (default 5).
+2. A reconnect goroutine attempts reconnection with `ReconnectDelay` between attempts, up to `MaxReconnects`.
+3. On successful reconnect, the circuit breaker resets to closed and normal operation resumes.
+
+**Q: How do I add OpenTelemetry?**
+
+```go
+otelMetrics, err := stream.NewOTelMetrics("my-app", "my-app")
+pipeline.WithMetrics(otelMetrics)
+```
+
+This captures read/write/failure counters, retry counts, backpressure wait times, and read/write latencies as OpenTelemetry instruments.
+
+**Q: How do I add structured logging?**
+
+```go
+logger := stream.NewSlogLogger(slog.LevelInfo)
+pipeline.WithLogger(logger)
+// Or per-provider:
+kafkaSource.WithLogger(logger)
+```
+
+Log output is JSON by default. Wraps Go's `log/slog`.
 
 ---
 

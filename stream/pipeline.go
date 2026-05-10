@@ -29,6 +29,8 @@ type Pipeline[T any] struct {
 	routeSinks   [][]Sink[T]
 
 	slideNext time.Time
+	logger    Logger
+	health    *HealthProbe
 }
 
 func NewPipeline[T any](source Source[T], sink Sink[T]) *Pipeline[T] {
@@ -37,8 +39,21 @@ func NewPipeline[T any](source Source[T], sink Sink[T]) *Pipeline[T] {
 		sinks:    []Sink[T]{sink},
 		retryCfg: DefaultRetryConfig(),
 		metrics:  NoopMetrics{},
+		logger:   &NopLogger{},
 		workers:  1,
 	}
+}
+
+func (p *Pipeline[T]) WithLogger(l Logger) *Pipeline[T] {
+	if l != nil {
+		p.logger = l
+	}
+	return p
+}
+
+func (p *Pipeline[T]) WithHealth(probe *HealthProbe) *Pipeline[T] {
+	p.health = probe
+	return p
 }
 
 func (p *Pipeline[T]) WithRetryConfig(cfg RetryConfig) *Pipeline[T] {
@@ -194,8 +209,22 @@ func (p *Pipeline[T]) Run(ctx context.Context) error {
 		}
 	}
 
+	p.logger.Info(ctx, "pipeline starting",
+		"workers", p.workers,
+		"sinks", len(snks),
+		"transforms", len(p.transforms),
+		"batch", p.batchCfg.Size > 0 || p.batchCfg.Interval > 0,
+		"window", p.windowCfg.Size > 0,
+	)
+
 	if err := trackedSrc.Open(ctx); err != nil {
 		return fmt.Errorf("pipeline: source open: %w", err)
+	}
+
+	if p.health != nil {
+		p.health.RegisterComponent("pipeline", func(ctx context.Context) HealthReport {
+			return HealthReport{Status: StatusHealthy, Component: "pipeline", Time: time.Now()}
+		})
 	}
 
 	var openErrs []error

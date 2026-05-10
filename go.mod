@@ -1,5 +1,9 @@
 module github.com/kennyrobert88/go-stream-processing
 
+// Version: v0.5.0 (pre-1.0)
+// Versioning: semver via git tags, follow Go module versioning conventions.
+// For v2+, use the /v2 module path suffix.
+
 go 1.25.0
 
 require (
