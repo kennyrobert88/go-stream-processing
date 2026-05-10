@@ -21,6 +21,7 @@ func (c TLSConfig) Build() (*tls.Config, error) {
 		return nil, nil
 	}
 	cfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: c.InsecureSkipVerify,
 		ServerName:         c.ServerName,
 	}

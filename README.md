@@ -7,6 +7,62 @@
 
 ---
 
+## Recent Updates
+
+### Idle Detection & Drain Phase
+
+Pipeline now supports **idle detection** — when `IdleTimeout` is set in the pipeline config, the source is wrapped so that `Read()` returns `context.DeadlineExceeded` if no message arrives within the timeout. This triggers a drain cycle: all sinks are flushed, the source is closed, and the pipeline stops cleanly.
+
+On graceful shutdown, the pipeline:
+1. Flushes all sinks (drain phase)
+2. Closes the source
+3. Saves the window state checkpoint (`WindowState.Snapshot()`)
+4. Stops backpressure and sink goroutines
+
+### Kafka Cooperative Rebalancing
+
+Kafka source now supports **cooperative rebalancing** (sticky partition assignment), enabled via:
+
+```go
+cfg := source.KafkaSourceConfig{
+    CooperativeRebalance: true,
+    LagMonitorInterval:   5 * time.Second,
+}
+```
+
+This uses `RoundRobinGroupBalancer` for even partition distribution across consumers. The `StartOffset` config field has been removed (use `kafka.ReaderConfig` defaults instead).
+
+### Event-Time Tracking in Windows
+
+Window processing now integrates watermark tracking via `EventTimeTracker` — watermarks are advanced as messages arrive, providing better handling of out-of-order events in tumbling/sliding/session windows.
+
+### Watermark Advance Fix
+
+Fixed a bug where `WindowState.Advance()` was incorrectly called on the window state instead of `EventTimeTracker.Advance()` on the watermark tracker.
+
+### Type-Safe Window Draining
+
+The type-unsafe `WindowState.DrainN` call in the `WindowTypeCount` case has been removed — generics prevent conversion between `[]Message[[]byte]` and `[]Message[T]`, so count windows now drain through the same safe path as other window types.
+
+### Checkpoint Store Fix
+
+`NewFileOffsetStore` now correctly returns two values (`store, err`) instead of one, matching the updated return signature.
+
+### Schema Registry Fix
+
+Fixed `schemaregistry.go` returning `0` instead of `nil` for a `*SchemaMetadata` error path.
+
+### TLS MinVersion
+
+TLS `Build()` now explicitly sets `MinVersion: tls.VersionTLS12`, matching the minimum expected by the test suite and improving security posture.
+
+### CLI Builder Fixes
+
+- `source.WithBrokers` variadic spread fixed (`k.Brokers...` instead of `k.Brokers`)
+- PubSub sink `TopicID` now correctly reads from the sink config instead of the source config
+
+---
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -524,12 +580,23 @@ if err := pipeline.Run(ctx); err != nil {
 }
 ```
 
-On shutdown:
-1. The read loop sees the cancelled context and exits.
-2. All sinks are flushed (buffered writes are committed).
+On shutdown (or idle timeout):
+1. The read loop sees the cancelled context (or idle timeout triggers).
+2. **Drain phase**: all sinks are flushed (buffered writes are committed).
 3. Source is closed (Kafka consumer leaves the group, RabbitMQ channel closes).
 4. All sinks are closed (Kafka writer flushes, RabbitMQ connection closes).
 5. Backpressure and per-sink backpressure token refill goroutines are stopped.
+6. **Checkpoint**: window state is snapshot and saved to the checkpoint store (if both `windowState` and `checkpoint` are configured).
+
+**Idle detection** can be configured to auto-shutdown the pipeline after a period of inactivity:
+
+```go
+cfg := stream.PipelineConfig{
+    IdleTimeout: stream.Duration{Duration: 30 * time.Second},
+}
+```
+
+When idle timeout fires, the pipeline drains, closes, and saves its checkpoint, then exits cleanly.
 
 ---
 
@@ -1098,13 +1165,14 @@ Built-in implementations: `NoopMetrics` (default), `MetricsCounter` (atomic coun
 | Constructor                   | Config struct           | Key config fields                    |
 |-------------------------------|-------------------------|--------------------------------------|
 | `source.NewKafkaSource`       | `KafkaSourceConfig`     | `Brokers`, `Topic`, `GroupID`        |
-| `source.NewKafkaSourceWithOptions` | functional options | `WithBrokers`, `WithTopic`, `WithGroupID`, `WithKafkaTLS`, `WithSASLPlain`, `WithKafkaReconnect`, `WithManualCommit` |
+| `source.NewKafkaSourceWithOptions` | functional options | `WithBrokers`, `WithTopic`, `WithGroupID`, `WithKafkaTLS`, `WithSASLPlain`, `WithKafkaReconnect`, `WithManualCommit`, `WithCooperativeRebalance`, `WithLagMonitor` |
 | `sink.NewKafkaSink`           | `KafkaSinkConfig`       | `Brokers`, `Topic`                   |
 
 **Source details:**
 - Uses `kafka.Reader` with consumer groups for offset management.
 - `GroupID` is required (enables checkpointing and rebalancing).
 - `WatchPartitionChanges: true` for dynamic partition discovery.
+- **Cooperative rebalancing**: enable via `CooperativeRebalance: true` for sticky partition assignment using `RoundRobinGroupBalancer`. Optionally set `LagMonitorInterval` to monitor consumer lag.
 - TLS: configure via `WithKafkaTLS(tlsConfig)`.
 - SASL/PLAIN auth: configure via `WithSASLPlain(username, password)`.
 - Connection retry: `WithKafkaReconnect(delay, maxAttempts)`.

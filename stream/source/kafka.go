@@ -19,14 +19,16 @@ type KafkaSourceConfig struct {
 	MinBytes     int
 	MaxBytes     int
 
-	TLS              stream.TLSConfig
-	SASLUsername     string
-	SASLPassword     string
-	ReconnectDelay   time.Duration
-	MaxReconnects    int
-	HeartbeatInterval time.Duration
-	SessionTimeout   time.Duration
-	RebalanceTimeout time.Duration
+	TLS                stream.TLSConfig
+	SASLUsername       string
+	SASLPassword       string
+	ReconnectDelay     time.Duration
+	MaxReconnects      int
+	HeartbeatInterval  time.Duration
+	SessionTimeout     time.Duration
+	RebalanceTimeout   time.Duration
+	CooperativeRebalance bool
+	LagMonitorInterval time.Duration
 }
 
 type KafkaSourceOption func(*KafkaSourceConfig)
@@ -51,6 +53,12 @@ func WithSASLPlain(username, password string) KafkaSourceOption {
 }
 func WithKafkaReconnect(delay time.Duration, max int) KafkaSourceOption {
 	return func(c *KafkaSourceConfig) { c.ReconnectDelay = delay; c.MaxReconnects = max }
+}
+func WithCooperativeRebalance(v bool) KafkaSourceOption {
+	return func(c *KafkaSourceConfig) { c.CooperativeRebalance = v }
+}
+func WithLagMonitor(interval time.Duration) KafkaSourceOption {
+	return func(c *KafkaSourceConfig) { c.LagMonitorInterval = interval }
 }
 
 func DefaultKafkaSourceConfig() KafkaSourceConfig {
@@ -151,6 +159,9 @@ func (s *KafkaSource) connect(ctx context.Context) error {
 		RebalanceTimeout: s.cfg.RebalanceTimeout,
 		Dialer:           dialer,
 		WatchPartitionChanges: true,
+	}
+	if s.cfg.CooperativeRebalance {
+		readerCfg.GroupBalancers = []kafka.GroupBalancer{kafka.RoundRobinGroupBalancer{}}
 	}
 	s.reader = kafka.NewReader(readerCfg)
 

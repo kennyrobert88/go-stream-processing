@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
 type RouteFunc[T any] func(msg Message[T]) int
 
 type Pipeline[T any] struct {
+	mu           sync.RWMutex
 	source       Source[T]
 	sinks        []Sink[T]
 	dlq          Sink[T]
@@ -18,6 +20,8 @@ type Pipeline[T any] struct {
 	retryCfg     RetryConfig
 	batchCfg     BatchConfig
 	windowCfg    WindowConfig
+	windowState  *WindowState
+	watermark    *EventTimeTracker
 	backpressure *Backpressure
 	sinkBP       []*Backpressure
 	bpCfg        *BackpressureConfig
@@ -27,10 +31,13 @@ type Pipeline[T any] struct {
 	workers      int
 	routes       []RouteFunc[T]
 	routeSinks   [][]Sink[T]
+	checkpoint   *CheckpointStore
 
-	slideNext time.Time
-	logger    Logger
-	health    *HealthProbe
+	slideNext   time.Time
+	logger      Logger
+	health      *HealthProbe
+	idleTimeout time.Duration
+	running     bool
 }
 
 func NewPipeline[T any](source Source[T], sink Sink[T]) *Pipeline[T] {
@@ -54,6 +61,66 @@ func (p *Pipeline[T]) WithLogger(l Logger) *Pipeline[T] {
 func (p *Pipeline[T]) WithHealth(probe *HealthProbe) *Pipeline[T] {
 	p.health = probe
 	return p
+}
+
+func (p *Pipeline[T]) WithIdleTimeout(timeout time.Duration) *Pipeline[T] {
+	p.idleTimeout = timeout
+	return p
+}
+
+func (p *Pipeline[T]) WithCheckpoint(store CheckpointStore) *Pipeline[T] {
+	p.checkpoint = &store
+	return p
+}
+
+func (p *Pipeline[T]) WithWatermark(tracker *EventTimeTracker) *Pipeline[T] {
+	p.watermark = tracker
+	return p
+}
+
+func (p *Pipeline[T]) WithWindowState(ws *WindowState) *Pipeline[T] {
+	p.windowState = ws
+	return p
+}
+
+func (p *Pipeline[T]) RemoveSink(idx int) *Pipeline[T] {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx >= 0 && idx < len(p.sinks) {
+		p.sinks = append(p.sinks[:idx], p.sinks[idx+1:]...)
+	}
+	return p
+}
+
+func (p *Pipeline[T]) RemoveTransform(idx int) *Pipeline[T] {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx >= 0 && idx < len(p.transforms) {
+		p.transforms = append(p.transforms[:idx], p.transforms[idx+1:]...)
+	}
+	return p
+}
+
+func (p *Pipeline[T]) ClearTransforms() *Pipeline[T] {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.transforms = nil
+	p.flatMaps = nil
+	return p
+}
+
+func (p *Pipeline[T]) Sinks() []Sink[T] {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make([]Sink[T], len(p.sinks))
+	copy(result, p.sinks)
+	return result
+}
+
+func (p *Pipeline[T]) IsRunning() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.running
 }
 
 func (p *Pipeline[T]) WithRetryConfig(cfg RetryConfig) *Pipeline[T] {
@@ -217,9 +284,24 @@ func (p *Pipeline[T]) Run(ctx context.Context) error {
 		"window", p.windowCfg.Size > 0,
 	)
 
+	if p.idleTimeout > 0 {
+		src = WithIdleDetection(src, p.idleTimeout)
+	}
+
+	if p.watermark == nil {
+		p.watermark = NewEventTimeTracker()
+	}
+	if p.windowState == nil && p.windowCfg.Size > 0 {
+		p.windowState = NewWindowState(DefaultWindowStateConfig())
+	}
+
 	if err := trackedSrc.Open(ctx); err != nil {
 		return fmt.Errorf("pipeline: source open: %w", err)
 	}
+
+	p.mu.Lock()
+	p.running = true
+	p.mu.Unlock()
 
 	if p.health != nil {
 		p.health.RegisterComponent("pipeline", func(ctx context.Context) HealthReport {
@@ -234,6 +316,9 @@ func (p *Pipeline[T]) Run(ctx context.Context) error {
 		}
 	}
 	if len(openErrs) > 0 {
+		p.mu.Lock()
+		p.running = false
+		p.mu.Unlock()
 		trackedSrc.Close(ctx)
 		for _, ts := range trackedSinks {
 			ts.Close(ctx)
@@ -243,25 +328,48 @@ func (p *Pipeline[T]) Run(ctx context.Context) error {
 
 	err := p.runLoop(ctx, src, snks)
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	p.mu.Lock()
+	p.running = false
+	p.mu.Unlock()
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+
 	for _, snk := range snks {
-		snk.Flush(closeCtx)
+		if ferr := snk.Flush(drainCtx); ferr != nil && err == nil {
+			err = fmt.Errorf("pipeline: sink flush: %w", ferr)
+		}
 	}
+
 	for _, ts := range trackedSinks {
-		if cerr := ts.Close(closeCtx); cerr != nil && err == nil {
+		if cerr := ts.Close(drainCtx); cerr != nil && err == nil {
 			err = fmt.Errorf("pipeline: sink close: %w", cerr)
 		}
 	}
-	if cerr := trackedSrc.Close(closeCtx); cerr != nil && err == nil {
+
+	if cerr := trackedSrc.Close(drainCtx); cerr != nil && err == nil {
 		err = fmt.Errorf("pipeline: source close: %w", cerr)
 	}
+
 	if p.backpressure != nil {
 		p.backpressure.Close()
 	}
 	for _, bp := range p.sinkBP {
 		bp.Close()
 	}
+
+	if p.windowState != nil && p.checkpoint != nil {
+		checkpoint := Checkpoint{
+			Source:      "pipeline",
+			Offsets:     make(map[string]string),
+			WindowState: p.windowState.Snapshot(),
+			Timestamp:   time.Now(),
+		}
+		if cerr := (*p.checkpoint).Save(context.Background(), checkpoint); cerr != nil {
+			p.logger.Error(context.Background(), "failed to save checkpoint", "error", cerr)
+		}
+	}
+
 	return err
 }
 
@@ -428,6 +536,22 @@ func (p *Pipeline[T]) processWindow(ctx context.Context, snks []Sink[T], buf *[]
 		return
 	}
 
+	if p.watermark != nil {
+		for _, msg := range *buf {
+			if !msg.Timestamp.IsZero() {
+				p.watermark.Observe(msg.Timestamp)
+			}
+		}
+	}
+
+	if p.windowState != nil && len(*buf) > p.windowState.maxSize {
+		p.logger.Warn(ctx, "window buffer exceeds max size, forcing flush",
+			"size", len(*buf), "max", p.windowState.maxSize)
+		p.emitWindow(ctx, snks, *buf)
+		*buf = nil
+		return
+	}
+
 	switch p.windowCfg.Type {
 	case WindowTypeCount:
 		if len(*buf) >= p.windowCfg.Count {
@@ -481,6 +605,9 @@ func (p *Pipeline[T]) processWindow(ctx context.Context, snks []Sink[T], buf *[]
 		last := (*buf)[len(*buf)-1]
 		windowEnd := first.Timestamp.Truncate(p.windowCfg.Size).Add(p.windowCfg.Size)
 		if last.Timestamp.After(windowEnd) || last.Timestamp.Equal(windowEnd) {
+			if p.watermark != nil {
+				p.watermark.Advance(p.watermark.MaxTimestamp())
+			}
 			p.emitWindow(ctx, snks, *buf)
 			*buf = nil
 		}
