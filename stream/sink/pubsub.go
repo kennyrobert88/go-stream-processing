@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 
 	"github.com/kennyrobert88/go-stream-processing/stream"
 )
@@ -17,11 +17,11 @@ type PubSubSinkConfig struct {
 }
 
 type PubSubSink struct {
-	cfg    PubSubSinkConfig
-	client *pubsub.Client
-	topic  *pubsub.Topic
-	cb     *stream.CircuitBreaker
-	logger stream.Logger
+	cfg       PubSubSinkConfig
+	client    *pubsub.Client
+	publisher *pubsub.Publisher
+	cb        *stream.CircuitBreaker
+	logger    stream.Logger
 }
 
 func NewPubSubSink(cfg PubSubSinkConfig) *PubSubSink {
@@ -43,13 +43,15 @@ func (s *PubSubSink) Open(ctx context.Context) error {
 		return fmt.Errorf("pubsub sink client: %w", err)
 	}
 	s.client = client
-	s.topic = client.Topic(s.cfg.TopicID)
+	s.publisher = client.Publisher(s.cfg.TopicID)
 	if s.cfg.NumGoroutines > 0 {
-		s.topic.PublishSettings.NumGoroutines = s.cfg.NumGoroutines
+		s.publisher.PublishSettings.NumGoroutines = s.cfg.NumGoroutines
 	} else {
-		s.topic.PublishSettings.NumGoroutines = 10
+		s.publisher.PublishSettings.NumGoroutines = 10
 	}
-	s.topic.PublishSettings.BufferedByteLimit = s.cfg.MaxOutstandingBytes
+	if s.cfg.MaxOutstandingBytes > 0 {
+		s.publisher.PublishSettings.FlowControlSettings.MaxOutstandingBytes = s.cfg.MaxOutstandingBytes
+	}
 	s.logger.Info(ctx, "pubsub sink connected",
 		"project", s.cfg.ProjectID,
 		"topic", s.cfg.TopicID,
@@ -60,8 +62,8 @@ func (s *PubSubSink) Open(ctx context.Context) error {
 func (s *PubSubSink) Flush(_ context.Context) error { return nil }
 
 func (s *PubSubSink) Close(ctx context.Context) error {
-	if s.topic != nil {
-		s.topic.Stop()
+	if s.publisher != nil {
+		s.publisher.Stop()
 	}
 	if s.client != nil {
 		err := s.client.Close()
@@ -77,7 +79,7 @@ func (s *PubSubSink) Write(ctx context.Context, msg stream.Message[[]byte]) erro
 		for k, v := range msg.Headers {
 			attrs[k] = string(v)
 		}
-		result := s.topic.Publish(ctx, &pubsub.Message{
+		result := s.publisher.Publish(ctx, &pubsub.Message{
 			Data:       msg.Value,
 			Attributes: attrs,
 		})

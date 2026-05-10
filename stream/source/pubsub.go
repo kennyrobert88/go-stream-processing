@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 
 	"github.com/kennyrobert88/go-stream-processing/stream"
 )
@@ -20,7 +20,6 @@ type PubSubSourceConfig struct {
 	NumGoroutines          int
 	ReconnectDelay         time.Duration
 	MaxReconnects          int
-	Synchronous            bool
 }
 
 type PubSubSourceOption func(*PubSubSourceConfig)
@@ -42,19 +41,18 @@ func DefaultPubSubSourceConfig() PubSubSourceConfig {
 		NumGoroutines:          10,
 		ReconnectDelay:         time.Second,
 		MaxReconnects:          10,
-		Synchronous:            false,
 	}
 }
 
 type PubSubSource struct {
-	cfg     PubSubSourceConfig
-	client  *pubsub.Client
-	sub     *pubsub.Subscription
-	cancel  context.CancelFunc
-	msgs    chan *pubsub.Message
-	wg      sync.WaitGroup
-	cb      *stream.CircuitBreaker
-	logger  stream.Logger
+	cfg        PubSubSourceConfig
+	client     *pubsub.Client
+	subscriber *pubsub.Subscriber
+	cancel     context.CancelFunc
+	msgs       chan *pubsub.Message
+	wg         sync.WaitGroup
+	cb         *stream.CircuitBreaker
+	logger     stream.Logger
 }
 
 func NewPubSubSource(cfg PubSubSourceConfig) *PubSubSource {
@@ -86,11 +84,10 @@ func (s *PubSubSource) Open(ctx context.Context) error {
 	}
 	s.client = client
 
-	s.sub = client.Subscription(s.cfg.SubscriptionID)
-	s.sub.ReceiveSettings.MaxOutstandingMessages = s.cfg.MaxOutstandingMessages
-	s.sub.ReceiveSettings.MaxOutstandingBytes = s.cfg.MaxOutstandingBytes
-	s.sub.ReceiveSettings.NumGoroutines = s.cfg.NumGoroutines
-	s.sub.ReceiveSettings.Synchronous = s.cfg.Synchronous
+	s.subscriber = client.Subscriber(s.cfg.SubscriptionID)
+	s.subscriber.ReceiveSettings.MaxOutstandingMessages = s.cfg.MaxOutstandingMessages
+	s.subscriber.ReceiveSettings.MaxOutstandingBytes = s.cfg.MaxOutstandingBytes
+	s.subscriber.ReceiveSettings.NumGoroutines = s.cfg.NumGoroutines
 
 	recvCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -111,7 +108,7 @@ func (s *PubSubSource) Open(ctx context.Context) error {
 
 func (s *PubSubSource) receiveLoop(ctx context.Context) {
 	for {
-		err := s.sub.Receive(ctx, func(_ context.Context, msg *pubsub.Message) {
+		err := s.subscriber.Receive(ctx, func(_ context.Context, msg *pubsub.Message) {
 			select {
 			case s.msgs <- msg:
 			case <-ctx.Done():
