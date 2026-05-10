@@ -38,7 +38,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Unit Tests
-        run: go test ./stream/... ./internal/... -count=1 -timeout=120s -v 2>&1 | go run github.com/rakyll/gotest@latest
+        run: go run github.com/rakyll/gotest@latest ./stream/... ./internal/... -count=1 -timeout=120s -v
       - name: Race Detection
         run: go test ./stream/... ./internal/... -race -count=1 -timeout=120s
       - name: Integration Build Check
