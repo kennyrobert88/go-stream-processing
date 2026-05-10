@@ -74,6 +74,7 @@ The `Pipeline[T]` wires a `Source → Transform(s) → Sink` with built-in retry
 |-------------|--------|------|----------------------------|
 | Apache Kafka | ✓      | ✓    | `segmentio/kafka-go`       |
 | AWS Kinesis  | ✓      | ✓    | `aws-sdk-go-v2`            |
+| Google Pub/Sub | ✓    | ✓    | `cloud.google.com/go/pubsub` |
 | RabbitMQ     | ✓      | ✓    | `rabbitmq/amqp091-go`      |
 
 ---
@@ -319,6 +320,40 @@ snk := sink.NewKinesisSink(sink.KinesisSinkConfig{
 ```
 
 Requires valid [AWS credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html) in `~/.aws/credentials` or environment variables.
+
+### 6.5. Swap to Google Cloud Pub/Sub
+
+```go
+// Replace with Pub/Sub constructors:
+src := source.NewPubSubSource(source.PubSubSourceConfig{
+    ProjectID:      "my-project",
+    SubscriptionID: "input-subscription",
+})
+
+snk := sink.NewPubSubSink(sink.PubSubSinkConfig{
+    ProjectID: "my-project",
+    TopicID:   "output-topic",
+})
+```
+
+Requires a Google Cloud project with Pub/Sub enabled and [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) configured. For local development, authenticate via:
+
+```bash
+gcloud auth application-default login
+```
+
+Pub/Sub uses a callback-based receive model (`sub.Receive`). The source bridges this into the `Read()` interface using an internal buffered channel, and wires `Message.Ack()`/`Message.Nack()` to the underlying Pub/Sub message acknowledgements.
+
+**Emulator for local development:**
+
+```bash
+docker run -d --name pubsub \
+  -p 8085:8085 \
+  gcr.io/google.com/cloudsdktool/cloud-sdk:latest \
+  gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+
+export PUBSUB_EMULATOR_HOST=localhost:8085
+```
 
 ### 7. Add transforms
 
@@ -629,6 +664,62 @@ func DefaultBackpressureConfig() BackpressureConfig // Rate: 1000, Burst: 100
 docker run -d --name rabbitmq \
   -p 5672:5672 -p 15672:15672 \
   rabbitmq:4-management
+```
+
+### Google Cloud Pub/Sub
+
+| Constructor                  | Config struct              | Key config fields                     |
+|------------------------------|----------------------------|---------------------------------------|
+| `source.NewPubSubSource`     | `PubSubSourceConfig`       | `ProjectID`, `SubscriptionID`         |
+| `sink.NewPubSubSink`         | `PubSubSinkConfig`         | `ProjectID`, `TopicID`                |
+
+**Source details:**
+- Creates a `pubsub.Client` and subscribes to the given subscription via `sub.Receive`.
+- Pub/Sub uses a callback-driven API; the source bridges this into the `Read()` interface using an internal buffered channel (capacity 100).
+- A background goroutine runs `sub.Receive` and pushes messages into the channel.
+- `Message.Ack()` and `Message.Nack()` are wired to the underlying Pub/Sub message's `Ack()` and `Nack()` methods, so acknowledgements propagate correctly back to the subscription.
+- The goroutine is lifecycle-managed: `Close()` cancels the receive context via `context.CancelFunc`, waits for the goroutine to exit, then closes the client.
+- If `Receive` encounters a non-context error, it is logged to stdout and the source enters a terminal error state.
+
+**Sink details:**
+- Creates a `pubsub.Client` and gets a handle to the topic.
+- Publishes with `topic.Publish()`; waits for the publish result with `result.Get(ctx)`.
+- Message headers are mapped to Pub/Sub `Attributes` (string-keyed string values).
+- The topic is assumed to exist; no `CreateTopic` call is made.
+
+**IAM roles (minimal):**
+
+| Resource       | Required roles                                      |
+|----------------|-----------------------------------------------------|
+| Source         | `roles/pubsub.subscriber` (or `roles/pubsub.viewer` + `roles/pubsub.subscriber`) |
+| Sink           | `roles/pubsub.publisher`                            |
+
+**Docker emulator setup:**
+```bash
+docker run -d --name pubsub \
+  -p 8085:8085 \
+  gcr.io/google.com/cloudsdktool/cloud-sdk:latest \
+  gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+
+export PUBSUB_EMULATOR_HOST=localhost:8085
+```
+
+**Create topic and subscription via gcloud:**
+```bash
+gcloud pubsub topics create output-topic
+gcloud pubsub subscriptions create input-subscription --topic input-topic
+```
+
+Or, using the emulator REST API:
+```bash
+# Create topic
+curl -X PUT http://localhost:8085/v1/projects/my-project/topics/input-topic
+curl -X PUT http://localhost:8085/v1/projects/my-project/topics/output-topic
+
+# Create subscription
+curl -X PUT http://localhost:8085/v1/projects/my-project/subscriptions/input-subscription \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "projects/my-project/topics/input-topic"}'
 ```
 
 ---

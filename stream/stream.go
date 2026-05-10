@@ -18,6 +18,11 @@ func NewMessage[T any](value T) Message[T] {
 	return Message[T]{Value: value}
 }
 
+func (m *Message[T]) SetAckNack(ackFn, nackFn func(context.Context) error) {
+	m.ackFn = ackFn
+	m.nackFn = nackFn
+}
+
 func (m *Message[T]) Ack(ctx context.Context) error {
 	if m.ackFn == nil {
 		return nil

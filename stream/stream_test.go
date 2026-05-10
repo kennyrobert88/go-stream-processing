@@ -41,6 +41,27 @@ func TestMessage_WithCallbacks(t *testing.T) {
 	}
 }
 
+func TestMessage_SetAckNack(t *testing.T) {
+	var acked, nacked atomic.Bool
+	msg := stream.Message[string]{}
+	msg.SetAckNack(
+		func(_ context.Context) error { acked.Store(true); return nil },
+		func(_ context.Context) error { nacked.Store(true); return nil },
+	)
+	if err := msg.Ack(context.Background()); err != nil {
+		t.Fatalf("unexpected ack error: %v", err)
+	}
+	if !acked.Load() {
+		t.Error("ack callback was not called")
+	}
+	if err := msg.Nack(context.Background()); err != nil {
+		t.Fatalf("unexpected nack error: %v", err)
+	}
+	if !nacked.Load() {
+		t.Error("nack callback was not called")
+	}
+}
+
 func TestMessage_AckNackContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
