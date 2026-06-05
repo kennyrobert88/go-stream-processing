@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -35,7 +37,11 @@ func (f *FileCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) e
 		return fmt.Errorf("checkpoint marshal: %w", err)
 	}
 
-	store, err := NewFileOffsetStore(f.pathFor(checkpoint.Source))
+	path, err := f.pathFor(checkpoint.Source)
+	if err != nil {
+		return err
+	}
+	store, err := NewFileOffsetStore(path)
 	if err != nil {
 		return fmt.Errorf("checkpoint store: %w", err)
 	}
@@ -50,7 +56,11 @@ func (f *FileCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) e
 }
 
 func (f *FileCheckpointStore) Load(ctx context.Context, source string) (*Checkpoint, error) {
-	store, err := NewFileOffsetStore(f.pathFor(source))
+	path, err := f.pathFor(source)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFileOffsetStore(path)
 	if err != nil {
 		return nil, err
 	}
@@ -68,13 +78,32 @@ func (f *FileCheckpointStore) Load(ctx context.Context, source string) (*Checkpo
 }
 
 func (f *FileCheckpointStore) Delete(ctx context.Context, source string) error {
-	store, err := NewFileOffsetStore(f.pathFor(source))
+	path, err := f.pathFor(source)
+	if err != nil {
+		return err
+	}
+	store, err := NewFileOffsetStore(path)
 	if err != nil {
 		return err
 	}
 	return store.Delete(ctx, "checkpoint")
 }
 
-func (f *FileCheckpointStore) pathFor(source string) string {
-	return f.basePath + "/" + source + "_checkpoint.json"
+func (f *FileCheckpointStore) pathFor(source string) (string, error) {
+	if source == "" || source == "." || source == ".." ||
+		filepath.IsAbs(source) ||
+		strings.ContainsAny(source, `/\`) {
+		return "", fmt.Errorf("checkpoint source %q is not a safe file name", source)
+	}
+
+	base := filepath.Clean(f.basePath)
+	target := filepath.Join(base, source+"_checkpoint.json")
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return "", fmt.Errorf("checkpoint path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("checkpoint path escapes base directory")
+	}
+	return target, nil
 }

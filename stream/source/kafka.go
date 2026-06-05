@@ -19,16 +19,16 @@ type KafkaSourceConfig struct {
 	MinBytes     int
 	MaxBytes     int
 
-	TLS                stream.TLSConfig
-	SASLUsername       string
-	SASLPassword       string
-	ReconnectDelay     time.Duration
-	MaxReconnects      int
-	HeartbeatInterval  time.Duration
-	SessionTimeout     time.Duration
-	RebalanceTimeout   time.Duration
+	TLS                  stream.TLSConfig
+	SASLUsername         string
+	SASLPassword         string
+	ReconnectDelay       time.Duration
+	MaxReconnects        int
+	HeartbeatInterval    time.Duration
+	SessionTimeout       time.Duration
+	RebalanceTimeout     time.Duration
 	CooperativeRebalance bool
-	LagMonitorInterval time.Duration
+	LagMonitorInterval   time.Duration
 }
 
 type KafkaSourceOption func(*KafkaSourceConfig)
@@ -96,8 +96,8 @@ type KafkaSource struct {
 
 func NewKafkaSource(cfg KafkaSourceConfig) *KafkaSource {
 	return &KafkaSource{
-		cfg: cfg,
-		cb: stream.NewCircuitBreaker(stream.DefaultCircuitBreakerConfig("kafka-source")),
+		cfg:    cfg,
+		cb:     stream.NewCircuitBreaker(stream.DefaultCircuitBreakerConfig("kafka-source")),
 		logger: &stream.NopLogger{},
 	}
 }
@@ -126,6 +126,12 @@ func (s *KafkaSource) Open(ctx context.Context) error {
 }
 
 func (s *KafkaSource) connect(ctx context.Context) error {
+	if err := s.cfg.TLS.Validate(); err != nil {
+		return stream.NewNonRetryableError(fmt.Errorf("kafka source tls: %w", err))
+	}
+	if (s.cfg.SASLUsername != "" || s.cfg.SASLPassword != "") && !s.cfg.TLS.Enabled {
+		return stream.NewNonRetryableError(fmt.Errorf("kafka source sasl requires TLS"))
+	}
 	tlsCfg, err := s.cfg.TLS.Build()
 	if err != nil {
 		return stream.NewNonRetryableError(fmt.Errorf("kafka source tls: %w", err))
@@ -146,17 +152,17 @@ func (s *KafkaSource) connect(ctx context.Context) error {
 	}
 
 	readerCfg := kafka.ReaderConfig{
-		Brokers:          s.cfg.Brokers,
-		Topic:            s.cfg.Topic,
-		GroupID:          s.cfg.GroupID,
-		GroupTopics:      []string{s.cfg.Topic},
-		MinBytes:         s.cfg.MinBytes,
-		MaxBytes:         s.cfg.MaxBytes,
-		CommitInterval:   0,
-		HeartbeatInterval: s.cfg.HeartbeatInterval,
-		SessionTimeout:   s.cfg.SessionTimeout,
-		RebalanceTimeout: s.cfg.RebalanceTimeout,
-		Dialer:           dialer,
+		Brokers:               s.cfg.Brokers,
+		Topic:                 s.cfg.Topic,
+		GroupID:               s.cfg.GroupID,
+		GroupTopics:           []string{s.cfg.Topic},
+		MinBytes:              s.cfg.MinBytes,
+		MaxBytes:              s.cfg.MaxBytes,
+		CommitInterval:        0,
+		HeartbeatInterval:     s.cfg.HeartbeatInterval,
+		SessionTimeout:        s.cfg.SessionTimeout,
+		RebalanceTimeout:      s.cfg.RebalanceTimeout,
+		Dialer:                dialer,
 		WatchPartitionChanges: true,
 	}
 	if s.cfg.CooperativeRebalance {

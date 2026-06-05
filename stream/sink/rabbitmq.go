@@ -3,6 +3,7 @@ package sink
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -16,11 +17,11 @@ type RabbitMQSinkConfig struct {
 	Exchange   string
 	RoutingKey string
 
-	TLS                stream.TLSConfig
-	ReconnectDelay     time.Duration
-	MaxReconnects      int
-	Heartbeat          time.Duration
-	DeliveryMode       uint8
+	TLS            stream.TLSConfig
+	ReconnectDelay time.Duration
+	MaxReconnects  int
+	Heartbeat      time.Duration
+	DeliveryMode   uint8
 }
 
 type RabbitMQSink struct {
@@ -54,6 +55,12 @@ func (s *RabbitMQSink) connect(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateRabbitMQRuntimeURL("rabbitmq sink", s.cfg.URL, s.cfg.TLS); err != nil {
+		return err
+	}
+	if err := s.cfg.TLS.Validate(); err != nil {
+		return fmt.Errorf("rabbitmq sink tls: %w", err)
+	}
 	tlsCfg, err := s.cfg.TLS.Build()
 	if err != nil {
 		return fmt.Errorf("rabbitmq sink tls: %w", err)
@@ -131,8 +138,9 @@ func (s *RabbitMQSink) Close(ctx context.Context) error {
 
 func (s *RabbitMQSink) ensureChannel(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.channel == nil || s.conn == nil {
+	ready := s.channel != nil && s.conn != nil
+	s.mu.Unlock()
+	if !ready {
 		return s.connect(ctx)
 	}
 	return nil
@@ -149,6 +157,11 @@ func (s *RabbitMQSink) Write(ctx context.Context, msg stream.Message[[]byte]) er
 			headers[k] = string(v)
 		}
 
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.channel == nil {
+			return fmt.Errorf("rabbitmq sink channel is not open")
+		}
 		err := s.channel.PublishWithContext(ctx,
 			s.cfg.Exchange,
 			s.cfg.RoutingKey,
@@ -166,4 +179,21 @@ func (s *RabbitMQSink) Write(ctx context.Context, msg stream.Message[[]byte]) er
 		}
 		return nil
 	})
+}
+
+func validateRabbitMQRuntimeURL(component, rawURL string, tlsCfg stream.TLSConfig) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%s url: %w", component, err)
+	}
+	if tlsCfg.Enabled && u.Scheme != "amqps" {
+		return fmt.Errorf("%s tls requires amqps URL", component)
+	}
+	if u.User != nil && u.Scheme != "amqps" {
+		password, hasPassword := u.User.Password()
+		if u.User.Username() != "" || (hasPassword && password != "") {
+			return fmt.Errorf("%s credentials require amqps URL", component)
+		}
+	}
+	return nil
 }

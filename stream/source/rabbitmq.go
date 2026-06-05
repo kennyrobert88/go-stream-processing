@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -17,12 +18,12 @@ type RabbitMQSourceConfig struct {
 	Exchange   string
 	RoutingKey string
 
-	TLS                stream.TLSConfig
-	ReconnectDelay     time.Duration
-	MaxReconnects      int
-	PrefetchCount      int
-	ConsumerTag        string
-	Heartbeat          time.Duration
+	TLS            stream.TLSConfig
+	ReconnectDelay time.Duration
+	MaxReconnects  int
+	PrefetchCount  int
+	ConsumerTag    string
+	Heartbeat      time.Duration
 }
 
 type RabbitMQSourceOption func(*RabbitMQSourceConfig)
@@ -97,6 +98,12 @@ func (s *RabbitMQSource) connect(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateRabbitMQRuntimeURL("rabbitmq source", s.cfg.URL, s.cfg.TLS); err != nil {
+		return stream.NewNonRetryableError(err)
+	}
+	if err := s.cfg.TLS.Validate(); err != nil {
+		return stream.NewNonRetryableError(fmt.Errorf("rabbitmq source tls: %w", err))
+	}
 	tlsCfg, err := s.cfg.TLS.Build()
 	if err != nil {
 		return stream.NewNonRetryableError(fmt.Errorf("rabbitmq source tls: %w", err))
@@ -168,6 +175,23 @@ func (s *RabbitMQSource) connect(ctx context.Context) error {
 		"queue", s.cfg.Queue,
 		"exchange", s.cfg.Exchange,
 	)
+	return nil
+}
+
+func validateRabbitMQRuntimeURL(component, rawURL string, tlsCfg stream.TLSConfig) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%s url: %w", component, err)
+	}
+	if tlsCfg.Enabled && u.Scheme != "amqps" {
+		return fmt.Errorf("%s tls requires amqps URL", component)
+	}
+	if u.User != nil && u.Scheme != "amqps" {
+		password, hasPassword := u.User.Password()
+		if u.User.Username() != "" || (hasPassword && password != "") {
+			return fmt.Errorf("%s credentials require amqps URL", component)
+		}
+	}
 	return nil
 }
 

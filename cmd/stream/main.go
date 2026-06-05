@@ -77,9 +77,24 @@ func main() {
 	)
 	p.WithHealth(probe)
 
-	healthServer := stream.NewHealthHTTPServer(":8080", probe)
-	if err := healthServer.Start(); err != nil {
-		log.Printf("Warning: health server: %v", err)
+	var healthServer *stream.HealthHTTPServer
+	if healthEnabled(cfg.Health) {
+		healthAddr := "127.0.0.1:8080"
+		includeAll := false
+		if cfg.Health != nil {
+			if cfg.Health.Addr != "" {
+				healthAddr = cfg.Health.Addr
+			}
+			includeAll = cfg.Health.IncludeAll
+		}
+		healthServer = stream.NewHealthHTTPServerWithOptions(
+			healthAddr,
+			probe,
+			stream.WithHealthAllEndpoint(includeAll),
+		)
+		if err := healthServer.Start(); err != nil {
+			log.Printf("Warning: health server: %v", err)
+		}
 	}
 
 	if cfg.Name != "" || *pipelineName != "" {
@@ -92,17 +107,29 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := healthServer.Stop(shutdownCtx); err != nil {
-		log.Printf("Warning: health server stop: %v", err)
+	if healthServer != nil {
+		if err := healthServer.Stop(shutdownCtx); err != nil {
+			log.Printf("Warning: health server stop: %v", err)
+		}
 	}
+}
+
+func healthEnabled(cfg *stream.HealthConfig) bool {
+	if cfg == nil || cfg.Enabled == nil {
+		return true
+	}
+	return *cfg.Enabled
 }
 
 func buildKafkaPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *stream.Pipeline[[]byte] {
 	k := cfg.Source.Kafka
 	src := source.NewKafkaSource(source.KafkaSourceConfig{
-		Brokers: k.Brokers,
-		Topic:   k.Topic,
-		GroupID: k.GroupID,
+		Brokers:      k.Brokers,
+		Topic:        k.Topic,
+		GroupID:      k.GroupID,
+		ManualCommit: k.ManualCommit,
+		SASLUsername: k.SASLUsername,
+		SASLPassword: k.SASLPassword,
 	})
 
 	if cfg.TLS != nil {
@@ -110,7 +137,9 @@ func buildKafkaPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *strea
 			source.WithBrokers(k.Brokers...),
 			source.WithTopic(k.Topic),
 			source.WithGroupID(k.GroupID),
+			source.WithManualCommit(k.ManualCommit),
 			source.WithKafkaTLS(*cfg.TLS),
+			source.WithSASLPlain(k.SASLUsername, k.SASLPassword),
 		)
 	}
 	src.WithLogger(logger)
@@ -121,9 +150,20 @@ func buildKafkaPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *strea
 		case "kafka":
 			sk := sc.Kafka
 			snk := sink.NewKafkaSink(sink.KafkaSinkConfig{
-				Brokers: sk.Brokers,
-				Topic:   sk.Topic,
+				Brokers:      sk.Brokers,
+				Topic:        sk.Topic,
+				SASLUsername: sk.SASLUsername,
+				SASLPassword: sk.SASLPassword,
 			})
+			if cfg.TLS != nil {
+				snk = sink.NewKafkaSink(sink.KafkaSinkConfig{
+					Brokers:      sk.Brokers,
+					Topic:        sk.Topic,
+					SASLUsername: sk.SASLUsername,
+					SASLPassword: sk.SASLPassword,
+					TLS:          *cfg.TLS,
+				})
+			}
 			snk.WithLogger(logger)
 			snks = append(snks, snk)
 		default:
@@ -150,9 +190,10 @@ func buildKinesisPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *str
 	)
 	src.WithLogger(logger)
 
+	sinkCfg := cfg.Sinks[0].Kinesis
 	snk := sink.NewKinesisSink(sink.KinesisSinkConfig{
-		StreamName: k.StreamName,
-		Region:     k.Region,
+		StreamName: sinkCfg.StreamName,
+		Region:     sinkCfg.Region,
 	})
 	snk.WithLogger(logger)
 
@@ -167,13 +208,31 @@ func buildRabbitMQPipeline(cfg *stream.PipelineConfig, logger stream.Logger) *st
 		Exchange:   r.Exchange,
 		RoutingKey: r.RoutingKey,
 	})
+	if cfg.TLS != nil {
+		src = source.NewRabbitMQSource(source.RabbitMQSourceConfig{
+			URL:        r.URL,
+			Queue:      r.Queue,
+			Exchange:   r.Exchange,
+			RoutingKey: r.RoutingKey,
+			TLS:        *cfg.TLS,
+		})
+	}
 	src.WithLogger(logger)
 
+	sinkCfg := cfg.Sinks[0].RabbitMQ
 	snk := sink.NewRabbitMQSink(sink.RabbitMQSinkConfig{
-		URL:        r.URL,
-		Exchange:   r.Exchange,
-		RoutingKey: r.RoutingKey,
+		URL:        sinkCfg.URL,
+		Exchange:   sinkCfg.Exchange,
+		RoutingKey: sinkCfg.RoutingKey,
 	})
+	if cfg.TLS != nil {
+		snk = sink.NewRabbitMQSink(sink.RabbitMQSinkConfig{
+			URL:        sinkCfg.URL,
+			Exchange:   sinkCfg.Exchange,
+			RoutingKey: sinkCfg.RoutingKey,
+			TLS:        *cfg.TLS,
+		})
+	}
 	snk.WithLogger(logger)
 
 	return stream.NewPipeline(src, snk)

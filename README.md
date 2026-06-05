@@ -9,6 +9,15 @@
 
 ## Recent Updates
 
+### Security Hardening
+
+- File checkpoint stores now reject unsafe source names, keep checkpoint files under the configured base directory, write with private permissions, and persist via atomic rename.
+- Schema Registry clients now use request timeouts, path-escape subjects, bound error response reads, and support explicit HTTP client, Basic Auth, and Bearer token options.
+- The CLI health server now binds to `127.0.0.1:8080` by default. Aggregate `/health/all` output is disabled unless configured.
+- Pipeline config validation catches missing provider blocks, missing required fields, plaintext credentials, insecure TLS config, and RabbitMQ URL scheme mismatches.
+- Filtered and routed messages are now settled with `Ack`/`Nack` behavior instead of being left pending.
+- Indirect `golang.org/x/*` dependencies were updated, and the module now declares `toolchain go1.26.4` for the fixed standard library.
+
 ### Idle Detection & Drain Phase
 
 Pipeline now supports **idle detection** — when `IdleTimeout` is set in the pipeline config, the source is wrapped so that `Read()` returns `context.DeadlineExceeded` if no message arrives within the timeout. This triggers a drain cycle: all sinks are flushed, the source is closed, and the pipeline stops cleanly.
@@ -355,12 +364,12 @@ Change **only** the source/sink constructors. The rest of the code stays the sam
 ```go
 // Replace Kafka source/sink constructors with:
 src := source.NewRabbitMQSource(source.RabbitMQSourceConfig{
-    URL:   "amqp://guest:guest@localhost:5672/",
+    URL:   "amqp://localhost:5672/",
     Queue: "orders-input",
 })
 
 snk := sink.NewRabbitMQSink(sink.RabbitMQSinkConfig{
-    URL:        "amqp://guest:guest@localhost:5672/",
+    URL:        "amqp://localhost:5672/",
     Exchange:   "orders",
     RoutingKey: "processed",
 })
@@ -672,6 +681,20 @@ http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
+The bundled CLI starts health checks on `127.0.0.1:8080` by default. Configure the listener explicitly when running under an orchestrator:
+
+```json
+{
+  "health": {
+    "enabled": true,
+    "addr": "127.0.0.1:8080",
+    "include_all": false
+  }
+}
+```
+
+Set `"include_all": true` only when detailed component reports are safe to expose. Health HTTP handlers only accept `GET`.
+
 ### OpenTelemetry
 
 Built-in OpenTelemetry integration captures metrics and traces:
@@ -785,6 +808,8 @@ tlsCfg := stream.TLSConfig{
 }
 ```
 
+`InsecureSkipVerify` is rejected by config validation and by built-in broker adapters. Use a CA bundle and `ServerName` for production certificates instead of disabling verification. Kafka SASL credentials require TLS, and RabbitMQ URLs with credentials must use `amqps://`.
+
 Provider-specific TLS:
 
 ```go
@@ -799,9 +824,37 @@ src := source.NewKafkaSourceWithOptions(
 
 // RabbitMQ source
 rmqSrc := source.NewRabbitMQSource(source.RabbitMQSourceConfig{
-    URL:  "amqps://rabbit.example.com:5671",
-    TLS:  tlsCfg,
+    URL: "amqps://user:password@rabbit.example.com:5671/",
+    TLS: tlsCfg,
 })
+```
+
+### Configuration Validation
+
+`LoadPipelineConfig` validates the loaded JSON before returning it. It checks required source/sink fields, rejects negative worker counts, rejects `InsecureSkipVerify`, requires TLS for Kafka SASL credentials, and requires `amqps://` for RabbitMQ URLs that include credentials or TLS.
+
+For local RabbitMQ development, omit credentials from the URL:
+
+```json
+{
+  "source": {
+    "type": "rabbitmq",
+    "rabbitmq": {
+      "url": "amqp://localhost:5672/",
+      "queue": "orders-input"
+    }
+  },
+  "sinks": [
+    {
+      "type": "rabbitmq",
+      "rabbitmq": {
+        "url": "amqp://localhost:5672/",
+        "exchange": "orders",
+        "routing_key": "processed"
+      }
+    }
+  ]
+}
 ```
 
 ### Connection Retry & Reconnect

@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+	"time"
 )
 
 type SchemaType int
@@ -33,11 +36,11 @@ func (s SchemaType) String() string {
 }
 
 type SchemaMetadata struct {
-	ID       int
-	Version  int
-	Schema   string
-	Type     SchemaType
-	Subject  string
+	ID         int
+	Version    int
+	Schema     string
+	Type       SchemaType
+	Subject    string
 	References []SchemaReference
 }
 
@@ -59,16 +62,97 @@ type SchemaSerde[T any] interface {
 }
 
 type ConfluentSchemaRegistry struct {
-	baseURL    string
-	client     *http.Client
-	mu         sync.RWMutex
+	baseURL     string
+	client      *http.Client
+	basicUser   string
+	basicPass   string
+	bearerToken string
+	mu          sync.RWMutex
 	schemaCache map[int]*SchemaMetadata
 }
 
+type SchemaRegistryOption func(*ConfluentSchemaRegistry)
+
 func NewConfluentSchemaRegistry(baseURL string) *ConfluentSchemaRegistry {
+	return NewConfluentSchemaRegistryWithOptions(baseURL)
+}
+
+func NewConfluentSchemaRegistryWithOptions(baseURL string, opts ...SchemaRegistryOption) *ConfluentSchemaRegistry {
+	client := &http.Client{Timeout: 10 * time.Second}
+	registry := &ConfluentSchemaRegistry{
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		client:      client,
+		schemaCache: make(map[int]*SchemaMetadata),
+	}
+	for _, opt := range opts {
+		opt(registry)
+	}
+	if registry.client == nil {
+		registry.client = client
+	}
+	return registry
+}
+
+func WithSchemaRegistryHTTPClient(client *http.Client) SchemaRegistryOption {
+	return func(c *ConfluentSchemaRegistry) {
+		if client != nil {
+			c.client = client
+		}
+	}
+}
+
+func WithSchemaRegistryBasicAuth(username, password string) SchemaRegistryOption {
+	return func(c *ConfluentSchemaRegistry) {
+		c.basicUser = username
+		c.basicPass = password
+	}
+}
+
+func WithSchemaRegistryBearerToken(token string) SchemaRegistryOption {
+	return func(c *ConfluentSchemaRegistry) {
+		c.bearerToken = token
+	}
+}
+
+const maxSchemaRegistryErrorBody = 4096
+
+func (c *ConfluentSchemaRegistry) endpoint(parts ...string) (string, error) {
+	if c.baseURL == "" {
+		return "", fmt.Errorf("schema registry: empty base URL")
+	}
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("schema registry base URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("schema registry: unsupported URL scheme %q", u.Scheme)
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		escaped = append(escaped, url.PathEscape(part))
+	}
+	return strings.TrimRight(u.String(), "/") + "/" + strings.Join(escaped, "/"), nil
+}
+
+func (c *ConfluentSchemaRegistry) applyAuth(req *http.Request) {
+	if c.basicUser != "" || c.basicPass != "" {
+		req.SetBasicAuth(c.basicUser, c.basicPass)
+	}
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
+}
+
+func NewConfluentSchemaRegistryWithClient(baseURL string, client *http.Client) *ConfluentSchemaRegistry {
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &ConfluentSchemaRegistry{
-		baseURL:     baseURL,
-		client:      &http.Client{},
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		client:      client,
 		schemaCache: make(map[int]*SchemaMetadata),
 	}
 }
@@ -103,10 +187,15 @@ func (c *ConfluentSchemaRegistry) Register(ctx context.Context, subject, schema 
 		return 0, fmt.Errorf("schema registry marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/subjects/"+subject+"/versions", bytes.NewReader(body))
+	endpoint, err := c.endpoint("subjects", subject, "versions")
+	if err != nil {
+		return 0, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("schema registry request: %w", err)
 	}
+	c.applyAuth(httpReq)
 	httpReq.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
 
 	resp, err := c.client.Do(httpReq)
@@ -119,7 +208,7 @@ func (c *ConfluentSchemaRegistry) Register(ctx context.Context, subject, schema 
 	}()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxSchemaRegistryErrorBody))
 		return 0, fmt.Errorf("schema registry: %s: %s", resp.Status, string(respBody))
 	}
 
@@ -139,10 +228,15 @@ func (c *ConfluentSchemaRegistry) Fetch(ctx context.Context, id int) (*SchemaMet
 	}
 	c.mu.RUnlock()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/schemas/ids/%d", c.baseURL, id), nil)
+	endpoint, err := c.endpoint("schemas", "ids", fmt.Sprintf("%d", id))
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("schema registry request: %w", err)
 	}
+	c.applyAuth(httpReq)
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
@@ -176,15 +270,20 @@ func (c *ConfluentSchemaRegistry) Fetch(ctx context.Context, id int) (*SchemaMet
 }
 
 func (c *ConfluentSchemaRegistry) FetchBySubject(ctx context.Context, subject string, version int) (*SchemaMetadata, error) {
-	url := fmt.Sprintf("%s/subjects/%s/versions/%d", c.baseURL, subject, version)
+	versionPart := fmt.Sprintf("%d", version)
 	if version == -1 {
-		url = fmt.Sprintf("%s/subjects/%s/versions/latest", c.baseURL, subject)
+		versionPart = "latest"
+	}
+	endpoint, err := c.endpoint("subjects", subject, "versions", versionPart)
+	if err != nil {
+		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("schema registry request: %w", err)
 	}
+	c.applyAuth(httpReq)
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {

@@ -468,11 +468,11 @@ func (p *Pipeline[T]) runLoopInternal(ctx context.Context, src Source[T], snks [
 			if useBatch {
 				p.flushBatch(ctx, snks, batch)
 			}
-		if useWindow && len(windowBuf) > 0 {
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			p.emitWindow(flushCtx, snks, windowBuf)
-			flushCancel()
-		}
+			if useWindow && len(windowBuf) > 0 {
+				flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				p.emitWindow(flushCtx, snks, windowBuf)
+				flushCancel()
+			}
 			return ctx.Err()
 		default:
 		}
@@ -512,6 +512,7 @@ func (p *Pipeline[T]) runLoopInternal(ctx context.Context, src Source[T], snks [
 		results, err := p.processTransforms(ctx, msg)
 		if err != nil {
 			if isFilterSkip(err) {
+				_ = msg.Ack(ctx)
 				continue
 			}
 			p.metrics.TransformError("")
@@ -643,6 +644,7 @@ func (p *Pipeline[T]) processAndWrite(ctx context.Context, snks []Sink[T], msg M
 	results, err := p.processTransforms(ctx, msg)
 	if err != nil {
 		if isFilterSkip(err) {
+			_ = msg.Ack(ctx)
 			return
 		}
 		p.metrics.TransformError("")
@@ -697,10 +699,13 @@ func (p *Pipeline[T]) writeToSinks(ctx context.Context, snks []Sink[T], msg Mess
 }
 
 func (p *Pipeline[T]) writeWithRouting(ctx context.Context, msg Message[T]) {
+	var failed bool
+	var written []Sink[T]
 	for i, route := range p.routes {
 		idx := route(msg)
 		if idx >= 0 && idx < len(p.routeSinks) && i < len(p.routeSinks[idx]) {
 			snk := p.routeSinks[idx][i]
+			written = append(written, snk)
 			err := DoWithRetry(ctx, func(ctx context.Context) error {
 				return snk.Write(ctx, msg)
 			}, p.retryCfg)
@@ -709,9 +714,21 @@ func (p *Pipeline[T]) writeWithRouting(ctx context.Context, msg Message[T]) {
 				if p.errorHandler != nil {
 					p.errorHandler.OnWriteError(ctx, convertMsg(msg), err)
 				}
+				failed = true
 			}
 		}
 	}
+	for _, snk := range written {
+		_ = snk.Flush(ctx)
+	}
+	if failed {
+		_ = msg.Nack(ctx)
+		if p.dlq != nil {
+			_ = p.dlq.Write(ctx, msg)
+		}
+		return
+	}
+	_ = msg.Ack(ctx)
 }
 
 func (p *Pipeline[T]) flushBatch(ctx context.Context, snks []Sink[T], batch []Message[T]) {

@@ -12,12 +12,12 @@ import (
 )
 
 type KafkaSinkConfig struct {
-	Brokers       []string
-	Topic         string
-	BatchSize     int
-	BatchTimeout  time.Duration
-	MaxRetries    int
-	WriteTimeout  time.Duration
+	Brokers      []string
+	Topic        string
+	BatchSize    int
+	BatchTimeout time.Duration
+	MaxRetries   int
+	WriteTimeout time.Duration
 	RequiredAcks kafka.RequiredAcks
 	TLS          stream.TLSConfig
 	SASLUsername string
@@ -69,6 +69,12 @@ func (s *KafkaSink) WithLogger(l stream.Logger) *KafkaSink {
 }
 
 func (s *KafkaSink) Open(_ context.Context) error {
+	if err := s.cfg.TLS.Validate(); err != nil {
+		return fmt.Errorf("kafka sink tls: %w", err)
+	}
+	if (s.cfg.SASLUsername != "" || s.cfg.SASLPassword != "") && !s.cfg.TLS.Enabled {
+		return fmt.Errorf("kafka sink sasl requires TLS")
+	}
 	tlsCfg, err := s.cfg.TLS.Build()
 	if err != nil {
 		return fmt.Errorf("kafka sink tls: %w", err)

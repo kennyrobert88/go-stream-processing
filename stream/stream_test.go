@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +16,12 @@ import (
 	"github.com/kennyrobert88/go-stream-processing/internal/mocks"
 	"github.com/kennyrobert88/go-stream-processing/stream"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestMessage_NewMessage(t *testing.T) {
 	msg := stream.NewMessage("hello")
@@ -1216,6 +1226,129 @@ func TestPipeline_AckNackOnFailure(t *testing.T) {
 
 	if nacked.Load() == 0 {
 		t.Error("expected nacks on write failure")
+	}
+}
+
+func TestPipeline_AcksFilteredMessages(t *testing.T) {
+	var acked, nacked atomic.Int32
+	msg := stream.NewMessage("skip")
+	msg.SetAckNack(
+		func(_ context.Context) error { acked.Add(1); return nil },
+		func(_ context.Context) error { nacked.Add(1); return nil },
+	)
+	src := mocks.NewMockSource([]stream.Message[string]{msg})
+	snk := mocks.NewMockSink[string]()
+
+	pl := stream.NewPipeline(src, snk).Filter(func(_ context.Context, _ stream.Message[string]) (bool, error) {
+		return false, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = pl.Run(ctx)
+
+	if acked.Load() != 1 {
+		t.Fatalf("expected filtered message to be acked once, got %d", acked.Load())
+	}
+	if nacked.Load() != 0 {
+		t.Fatalf("expected filtered message not to be nacked, got %d", nacked.Load())
+	}
+	if got := len(snk.Written()); got != 0 {
+		t.Fatalf("expected no writes for filtered message, got %d", got)
+	}
+}
+
+func TestPipeline_RoutingSettlesMessages(t *testing.T) {
+	var acked, nacked atomic.Int32
+	msg := stream.NewMessage("route")
+	msg.SetAckNack(
+		func(_ context.Context) error { acked.Add(1); return nil },
+		func(_ context.Context) error { nacked.Add(1); return nil },
+	)
+	src := mocks.NewMockSource([]stream.Message[string]{msg})
+	snk := mocks.NewMockSink[string]()
+
+	pl := stream.NewPipeline(src, snk).Split(
+		[]stream.RouteFunc[string]{func(_ stream.Message[string]) int { return 0 }},
+		[][]stream.Sink[string]{{snk}},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = pl.Run(ctx)
+
+	if acked.Load() != 1 {
+		t.Fatalf("expected routed message to be acked once, got %d", acked.Load())
+	}
+	if nacked.Load() != 0 {
+		t.Fatalf("expected routed message not to be nacked, got %d", nacked.Load())
+	}
+	if got := len(snk.Written()); got != 1 {
+		t.Fatalf("expected routed message to be written once, got %d", got)
+	}
+}
+
+func TestFileCheckpointStoreRejectsUnsafeSource(t *testing.T) {
+	store := stream.NewFileCheckpointStore(t.TempDir())
+	err := store.Save(context.Background(), stream.Checkpoint{
+		Source:  "../escape",
+		Offsets: map[string]string{},
+	})
+	if err == nil {
+		t.Fatal("expected unsafe checkpoint source to be rejected")
+	}
+}
+
+func TestFileCheckpointStoreWritesPrivateFile(t *testing.T) {
+	dir := t.TempDir()
+	store := stream.NewFileCheckpointStore(dir)
+	if err := store.Save(context.Background(), stream.Checkpoint{
+		Source:  "pipeline",
+		Offsets: map[string]string{"partition": "1"},
+	}); err != nil {
+		t.Fatalf("save checkpoint: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "pipeline_checkpoint.json"))
+	if err != nil {
+		t.Fatalf("stat checkpoint: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected checkpoint mode 0600, got %o", got)
+	}
+}
+
+func TestConfluentSchemaRegistryEscapesSubjectAndAppliesAuth(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.String() != "https://registry.example/subjects/a%2Fb/versions" {
+			t.Fatalf("subject was not path-escaped: %s", r.URL.String())
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "user" || pass != "pass" {
+			t.Fatalf("expected basic auth credentials")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":42}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	registry := stream.NewConfluentSchemaRegistryWithOptions(
+		"https://registry.example",
+		stream.WithSchemaRegistryHTTPClient(client),
+		stream.WithSchemaRegistryBasicAuth("user", "pass"),
+	)
+	id, err := registry.Register(context.Background(), "a/b", `{"type":"record"}`, stream.SchemaTypeAvro)
+	if err != nil {
+		t.Fatalf("register schema: %v", err)
+	}
+	if id != 42 {
+		t.Fatalf("expected schema id 42, got %d", id)
 	}
 }
 
