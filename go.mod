@@ -6,8 +6,6 @@ module github.com/kennyrobert88/go-stream-processing
 
 go 1.25.0
 
-toolchain go1.26.4
-
 require (
 	cloud.google.com/go/pubsub/v2 v2.4.0
 	github.com/aws/aws-sdk-go-v2 v1.41.7
