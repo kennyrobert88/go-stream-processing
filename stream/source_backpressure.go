@@ -7,10 +7,10 @@ import (
 )
 
 type SourceBackpressure struct {
-	mu      sync.RWMutex
-	limit   int
-	window  time.Duration
-	count   map[string]*sourceCounter
+	mu     sync.RWMutex
+	limit  int
+	window time.Duration
+	count  map[string]*sourceCounter
 }
 
 type sourceCounter struct {

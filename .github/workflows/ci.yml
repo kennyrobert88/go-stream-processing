@@ -17,9 +17,9 @@ jobs:
           go-version: "1.26"
           check-latest: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
 
   test:
     name: Test (Go ${{ matrix.go }})
@@ -38,7 +38,7 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Unit Tests
-        run: go run github.com/rakyll/gotest@latest ./stream/... ./internal/... -count=1 -timeout=120s -v
+        run: go run github.com/rakyll/gotest@v0.0.7 ./stream/... ./internal/... -count=1 -timeout=120s -v
       - name: Race Detection
         run: go test ./stream/... ./internal/... -race -count=1 -timeout=120s
       - name: Integration Build Check

@@ -80,9 +80,9 @@ func main() {
 		PrefetchCount:  100,
 	})
 	rmqSnk := sink.NewRabbitMQSink(sink.RabbitMQSinkConfig{
-		URL:        "amqp://guest:guest@localhost:5672/",
-		Exchange:   "output-exchange",
-		RoutingKey: "output-key",
+		URL:          "amqp://guest:guest@localhost:5672/",
+		Exchange:     "output-exchange",
+		RoutingKey:   "output-key",
 		DeliveryMode: 2, // persistent
 	})
 

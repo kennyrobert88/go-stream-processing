@@ -7,11 +7,11 @@ import (
 )
 
 type WindowState struct {
-	mu          sync.Mutex
-	buf         []Message[[]byte]
-	maxSize     int
-	watermark   time.Time
-	outOfOrder  bool
+	mu         sync.Mutex
+	buf        []Message[[]byte]
+	maxSize    int
+	watermark  time.Time
+	outOfOrder bool
 }
 
 type WindowStateConfig struct {

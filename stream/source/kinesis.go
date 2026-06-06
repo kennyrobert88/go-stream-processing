@@ -21,8 +21,8 @@ type KinesisSourceConfig struct {
 	MaxRecordsPerCall int32
 	PollInterval      time.Duration
 
-	ReconnectDelay    time.Duration
-	MaxReconnects     int
+	ReconnectDelay time.Duration
+	MaxReconnects  int
 }
 
 type KinesisSourceOption func(*KinesisSourceConfig)

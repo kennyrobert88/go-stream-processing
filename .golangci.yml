@@ -11,3 +11,7 @@ linters:
         linters:
           - errcheck
           - unused
+
+formatters:
+  enable:
+    - gofmt

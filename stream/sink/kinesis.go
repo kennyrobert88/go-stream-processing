@@ -15,10 +15,10 @@ import (
 )
 
 type KinesisSinkConfig struct {
-	StreamName       string
-	Region           string
-	MaxRetries       int
-	RetryBaseDelay   time.Duration
+	StreamName     string
+	Region         string
+	MaxRetries     int
+	RetryBaseDelay time.Duration
 }
 
 type KinesisSink struct {

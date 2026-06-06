@@ -18,7 +18,6 @@ type Message[T any] struct {
 	nackFn func(context.Context) error
 }
 
-
 func NewMessage[T any](value T) Message[T] {
 	return Message[T]{Value: value}
 }
