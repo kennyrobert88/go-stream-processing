@@ -16,12 +16,12 @@ type Metrics interface {
 
 type NoopMetrics struct{}
 
-func (NoopMetrics) MessageRead(_ string)                             {}
-func (NoopMetrics) MessageWritten(_ string)                          {}
-func (NoopMetrics) MessageFailed(_ string, _ error)                  {}
-func (NoopMetrics) TransformError(_ string)                          {}
-func (NoopMetrics) MessageRetried(_ string, _ int)                   {}
-func (NoopMetrics) BackpressureWait(_ string, _ time.Duration)       {}
+func (NoopMetrics) MessageRead(_ string)                       {}
+func (NoopMetrics) MessageWritten(_ string)                    {}
+func (NoopMetrics) MessageFailed(_ string, _ error)            {}
+func (NoopMetrics) TransformError(_ string)                    {}
+func (NoopMetrics) MessageRetried(_ string, _ int)             {}
+func (NoopMetrics) BackpressureWait(_ string, _ time.Duration) {}
 
 type MetricsCounter struct {
 	ReadCount      int64
@@ -32,12 +32,14 @@ type MetricsCounter struct {
 	BackpressureNs int64
 }
 
-func (c *MetricsCounter) MessageRead(_ string)                        { c.ReadCount++ }
-func (c *MetricsCounter) MessageWritten(_ string)                     { c.WrittenCount++ }
-func (c *MetricsCounter) MessageFailed(_ string, _ error)             { c.FailedCount++ }
-func (c *MetricsCounter) TransformError(_ string)                     { c.TransformErr++ }
-func (c *MetricsCounter) MessageRetried(_ string, _ int)              { c.RetryCount++ }
-func (c *MetricsCounter) BackpressureWait(_ string, d time.Duration)  { c.BackpressureNs += d.Nanoseconds() }
+func (c *MetricsCounter) MessageRead(_ string)            { c.ReadCount++ }
+func (c *MetricsCounter) MessageWritten(_ string)         { c.WrittenCount++ }
+func (c *MetricsCounter) MessageFailed(_ string, _ error) { c.FailedCount++ }
+func (c *MetricsCounter) TransformError(_ string)         { c.TransformErr++ }
+func (c *MetricsCounter) MessageRetried(_ string, _ int)  { c.RetryCount++ }
+func (c *MetricsCounter) BackpressureWait(_ string, d time.Duration) {
+	c.BackpressureNs += d.Nanoseconds()
+}
 
 type InstrumentedSource[T any] struct {
 	source  Source[T]

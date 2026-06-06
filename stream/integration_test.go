@@ -55,10 +55,10 @@ func TestKafkaPipeline_WithTLS_Integration(t *testing.T) {
 	skipIfNoBroker(t, "KAFKA_BROKERS_TLS")
 
 	tlsCfg := stream.TLSConfig{
-		Enabled:    true,
-		CAFile:     "testdata/ca.pem",
-		CertFile:   "testdata/client.pem",
-		KeyFile:    "testdata/client-key.pem",
+		Enabled:  true,
+		CAFile:   "testdata/ca.pem",
+		CertFile: "testdata/client.pem",
+		KeyFile:  "testdata/client-key.pem",
 	}
 
 	src := source.NewKafkaSourceWithOptions(
@@ -82,11 +82,11 @@ func TestKafkaPipeline_WithCircuitBreaker_Integration(t *testing.T) {
 	skipIfNoBroker(t, "KAFKA_BROKERS")
 
 	src := source.NewKafkaSource(source.KafkaSourceConfig{
-		Brokers:       []string{"localhost:9092"},
-		Topic:         "integration-test-cb-input",
-		GroupID:       "integration-test-cb-group",
+		Brokers:        []string{"localhost:9092"},
+		Topic:          "integration-test-cb-input",
+		GroupID:        "integration-test-cb-group",
 		ReconnectDelay: time.Second,
-		MaxReconnects: 2,
+		MaxReconnects:  2,
 	})
 	snk := sink.NewKafkaSink(sink.KafkaSinkConfig{
 		Brokers: []string{"localhost:9092"},
